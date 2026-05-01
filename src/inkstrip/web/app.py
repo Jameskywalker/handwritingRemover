@@ -1,9 +1,9 @@
 """Gradio demo: upload an image, see handwriting removed.
 
-This UI is a thin shell around the image pipeline — same code path the CLI
-uses. Three panels: original / detected mask / cleaned. Sliders expose the
-two parameters most worth tweaking on novel inputs (detection confidence,
-mask dilation).
+Three panels: original / mask / cleaned. The dropdown picks between the
+two detection strategies — color-based (best for red/blue/etc. ink on
+printed black text) and YOLO+morph (best for English handwriting). Sliders
+expose the parameters most worth tweaking.
 
 Run:
     inkstrip serve            # http://127.0.0.1:7860
@@ -18,73 +18,97 @@ from typing import Any
 import numpy as np
 
 from inkstrip.config import InkstripConfig
-from inkstrip.detect.yolo_hw import YoloHandwritingDetector
 from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
-from inkstrip.mask.morph import MorphMaskBuilder, mask_coverage
+from inkstrip.mask.color import detect_color_mask
+from inkstrip.mask.morph import mask_coverage
 from inkstrip.utils.logging import get_logger
 
 _log = get_logger("web")
 
-# Cache of (device, inpainter, image_size) → detector/inpainter so we don't reload
-# weights on every image.
-_DETECTOR: dict[str, YoloHandwritingDetector] = {}
+# Cache heavy components by device — first request warms them, subsequent
+# requests reuse.
 _INPAINTER: dict[str, LamaOnnxInpainter] = {}
+_DETECTOR: dict[str, Any] = {}
+
+_STRATEGY_LABELS = {
+    "color_red": "Red ink (recommended for red pen on printed text)",
+    "color_blue": "Blue ink",
+    "color_any": "Any colored ink (red+blue+green)",
+    "yolo_morph": "YOLOv8 detector (handwriting in any color, English-leaning)",
+}
 
 
-def _get_detector(cfg: InkstripConfig) -> YoloHandwritingDetector:
-    key = f"{cfg.device}|{cfg.det_imgsz}|{cfg.detector}"
-    if key not in _DETECTOR:
-        _log.info("loading YOLO detector: %s", key)
-        _DETECTOR[key] = YoloHandwritingDetector(cfg)
-    return _DETECTOR[key]
+def _get_inpainter(device: str) -> LamaOnnxInpainter:
+    if device not in _INPAINTER:
+        _log.info("loading LaMa ONNX inpainter for device=%s", device)
+        _INPAINTER[device] = LamaOnnxInpainter(InkstripConfig(device=device))
+    return _INPAINTER[device]
 
 
-def _get_inpainter(cfg: InkstripConfig) -> LamaOnnxInpainter:
-    key = f"{cfg.device}|{cfg.tile_size}"
-    if key not in _INPAINTER:
-        _log.info("loading LaMa ONNX inpainter: %s", key)
-        _INPAINTER[key] = LamaOnnxInpainter(cfg)
-    return _INPAINTER[key]
+def _get_detector(device: str):
+    if device not in _DETECTOR:
+        from inkstrip.detect.yolo_hw import YoloHandwritingDetector
+
+        _log.info("loading YOLO detector for device=%s", device)
+        _DETECTOR[device] = YoloHandwritingDetector(InkstripConfig(device=device))
+    return _DETECTOR[device]
 
 
 def _process(
     image: Any,
-    confidence: float,
+    strategy_label: str,
     dilate_px: int,
+    delta: int,
+    protect_print: bool,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
         raise ValueError("upload an image first")
-
-    cfg = InkstripConfig(
-        det_conf=float(confidence),
-        dilate_px=int(dilate_px) if dilate_px > 0 else None,
-        device=device,  # type: ignore[arg-type]
-    )
+    strategy = next(k for k, v in _STRATEGY_LABELS.items() if v == strategy_label)
 
     started = time.perf_counter()
-    arr = load_image(image, max_megapixels=cfg.max_image_megapixels).array
+    arr = load_image(image).array
 
-    detector = _get_detector(cfg)
-    boxes = detector.detect(arr)
-    mask = MorphMaskBuilder(cfg).build(arr, boxes)
+    if strategy == "yolo_morph":
+        from inkstrip.mask.morph import MorphMaskBuilder
 
-    if not boxes:
-        cleaned = arr
-        note = "No handwriting detected — output equals input."
+        cfg = InkstripConfig(
+            mask_strategy="yolo_morph",
+            dilate_px=int(dilate_px) if dilate_px > 0 else None,
+            device=device,  # type: ignore[arg-type]
+        )
+        detector = _get_detector(device)
+        boxes = detector.detect(arr)
+        mask = MorphMaskBuilder(cfg).build(arr, boxes)
+        bbox_count = len(boxes)
     else:
-        inpainter = _get_inpainter(cfg)
-        cleaned = inpainter.inpaint(arr, mask)
+        profile = {"color_red": "red", "color_blue": "blue", "color_any": "any_colored"}[strategy]
+        mask = detect_color_mask(
+            arr,
+            profile=profile,
+            dilate_px=int(dilate_px) if dilate_px > 0 else 7,
+            delta=int(delta) if delta > 0 else None,
+            protect_print=protect_print,
+        )
+        bbox_count = 0
+
+    has_target = bool((mask > 0).any())
+    if not has_target:
+        cleaned = arr
+        note = "No handwriting detected for this strategy — try lowering delta or switching strategy."
+    else:
+        cleaned = _get_inpainter(device).inpaint(arr, mask)
         note = ""
 
     elapsed = (time.perf_counter() - started) * 1000
+    cov = mask_coverage(mask) * 100
 
     mask_rgb = np.stack([mask, mask, mask], axis=-1)
-    summary = (
-        f"**{len(boxes)}** bbox · mask coverage **{mask_coverage(mask) * 100:.2f}%** "
-        f"· {elapsed:.0f} ms"
-    )
+    summary = f"**strategy** {strategy} · **mask coverage** {cov:.2f}%"
+    if bbox_count:
+        summary += f" · **{bbox_count} bbox**"
+    summary += f" · **{elapsed:.0f} ms**"
     if note:
         summary += f"\n\n{note}"
     return cleaned, mask_rgb, summary
@@ -96,9 +120,10 @@ def build_ui():
     with gr.Blocks(title="inkstrip — remove handwriting") as demo:
         gr.Markdown(
             "# inkstrip\n"
-            "Upload a photo or scanned page that contains handwritten ink on top of "
-            "printed content. The model detects handwriting bounding boxes, expands "
-            "them into a mask, and asks LaMa to repaint the background."
+            "Upload a page with handwritten ink on top of printed content. "
+            "Pick a strategy that matches the ink color — for most real-world "
+            "documents (red pen, blue pen) the color modes give dramatically "
+            "better results than the YOLO detector."
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -108,19 +133,28 @@ def build_ui():
                     image_mode="RGB",
                     sources=["upload", "clipboard"],
                 )
-                conf = gr.Slider(
-                    minimum=0.05,
-                    maximum=0.9,
-                    value=0.25,
-                    step=0.05,
-                    label="Detector confidence",
+                strategy = gr.Dropdown(
+                    choices=list(_STRATEGY_LABELS.values()),
+                    value=_STRATEGY_LABELS["color_red"],
+                    label="Strategy",
                 )
                 dilate = gr.Slider(
                     minimum=0,
                     maximum=25,
-                    value=0,
+                    value=7,
                     step=1,
-                    label="Mask dilation (px) — 0 means auto-scale by image size",
+                    label="Mask dilation (px)",
+                )
+                delta = gr.Slider(
+                    minimum=0,
+                    maximum=120,
+                    value=0,
+                    step=5,
+                    label="Color δ (0 = profile default; raise to be stricter)",
+                )
+                protect = gr.Checkbox(
+                    value=True,
+                    label="Protect printed text (skip black pixels even if dilated)",
                 )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
@@ -136,7 +170,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, conf, dilate, device],
+            inputs=[inp, strategy, dilate, delta, protect, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 

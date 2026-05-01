@@ -27,15 +27,27 @@ class InkstripConfig:
     render_dpi: int = 300
     """DPI for rasterizing scanned PDFs."""
 
-    # detection
+    # detection / mask strategy
+    mask_strategy: Literal["yolo_morph", "color_red", "color_blue", "color_any"] = "color_red"
+    """How to find handwriting:
+    - yolo_morph: YOLOv8 detector → bbox → dilate (best on real English handwriting)
+    - color_red / color_blue / color_any: pixel-level RGB channel-diff (best on
+      colored ink over printed black text — the most common real-world case).
+    """
     detector: str = "yolov8_hw"
     det_conf: float = 0.25
     det_iou: float = 0.45
     det_imgsz: int = 1280
 
-    # masking
+    # color-based mask params (used when mask_strategy starts with "color_")
+    color_delta: int | None = None
+    color_min_brightness: int | None = None
+    color_protect_print: bool = True
+
+    # mask post-processing
     dilate_px: int | None = None
-    """Pixels to dilate handwriting bboxes. None = auto-scale by DPI/image height."""
+    """Pixels to dilate the mask. None = auto-scale by image size for yolo_morph;
+    7 px is a good default for color modes."""
 
     closing_px: int = 3
     min_box_area: int = 20
