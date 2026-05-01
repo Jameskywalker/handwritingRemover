@@ -24,15 +24,26 @@ class InkstripConfig:
     photo_mode: bool = False
     """Apply perspective correction + deskew + CLAHE before detection. Use for phone photos."""
 
+    page_crop: bool | None = None
+    """Auto-detect a page quadrilateral and warp it flat before masking.
+    None inherits from photo_mode (the common case); set True/False to override."""
+
+    page_crop_min_area_ratio: float = 0.25
+    page_crop_deskew_max_deg: float = 5.0
+
     render_dpi: int = 300
     """DPI for rasterizing scanned PDFs."""
 
     # detection / mask strategy
-    mask_strategy: Literal["yolo_morph", "color_red", "color_blue", "color_any"] = "color_red"
+    mask_strategy: Literal[
+        "yolo_morph", "color_red", "color_blue", "color_any", "ocr_inverse"
+    ] = "color_red"
     """How to find handwriting:
     - yolo_morph: YOLOv8 detector → bbox → dilate (best on real English handwriting)
     - color_red / color_blue / color_any: pixel-level RGB channel-diff (best on
       colored ink over printed black text — the most common real-world case).
+    - ocr_inverse: OCR finds printed text, subtract from total ink mask. Works
+      on black-and-white pages where color cues don't apply.
     """
     detector: str = "yolov8_hw"
     det_conf: float = 0.25
@@ -43,6 +54,12 @@ class InkstripConfig:
     color_delta: int | None = None
     color_min_brightness: int | None = None
     color_protect_print: bool = True
+
+    # ocr_inverse params
+    ocr_lang: Literal["ch", "en", "ch_en"] = "ch_en"
+    ocr_min_confidence: float = 0.30
+    ocr_printed_pad_px: int = 4
+    ocr_printed_dilate_px: int = 2
 
     # mask post-processing
     dilate_px: int | None = None
@@ -71,6 +88,11 @@ class InkstripConfig:
     # safety / limits
     max_image_megapixels: float = 100.0
     """Refuse to process images above this size to avoid OOM."""
+
+    def __post_init__(self) -> None:
+        # page_crop sentinel: None inherits from photo_mode
+        if self.page_crop is None:
+            object.__setattr__(self, "page_crop", self.photo_mode)
 
     @classmethod
     def preset(cls, name: Literal["photo", "scan", "annot_only"]) -> "InkstripConfig":

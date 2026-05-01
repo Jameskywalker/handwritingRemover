@@ -61,6 +61,8 @@ class PageMetadata:
     mask_coverage: float = 0.0
     elapsed_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    page_cropped: bool = False
+    page_deskew_deg: float = 0.0
 
 
 @dataclass

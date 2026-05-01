@@ -71,3 +71,45 @@ def test_image_pipeline_runs_end_to_end(tmp_path: Path) -> None:
         f"changed pixels barely differ (avg L1 {diff_inside:.2f}); "
         "LaMa output may be saturated or inpaint contract may be wrong"
     )
+
+
+HW_JPG_CANDIDATES = [
+    Path("/home/james/projects/handwritingRemover/eval_outputs/00_input.jpg"),
+    Path("/mnt/e/downloads/hw.jpg"),
+]
+
+
+def _hw_jpg() -> Path | None:
+    for p in HW_JPG_CANDIDATES:
+        if p.exists():
+            return p
+    return None
+
+
+def test_page_crop_and_ocr_inverse_on_hw_jpg(tmp_path: Path) -> None:
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("rapidocr")
+    src = _hw_jpg()
+    if src is None:
+        pytest.skip("hw.jpg not present locally; skipping black-and-white e2e")
+
+    from inkstrip.api import remove_handwriting
+    from inkstrip.config import InkstripConfig
+
+    out = tmp_path / "cleaned_ocr.png"
+    cfg = InkstripConfig(
+        page_crop=True,
+        mask_strategy="ocr_inverse",
+        device="auto",
+    )
+    result = remove_handwriting(src, out, config=cfg)
+
+    assert result.output_path == out
+    assert out.exists()
+    page = result.pages[0]
+    # Either the page was cropped, or we got a graceful warning explaining why not.
+    assert page.page_cropped or any("page_crop" in w for w in result.warnings), result.warnings
+    # ocr_inverse is allowed to produce zero coverage if no printed text was found,
+    # but on hw.jpg there should be plenty of printed text.
+    assert page.bbox_count > 0, f"OCR found no printed text on {src}"
+    assert 0.0005 < page.mask_coverage < 0.5, page.mask_coverage

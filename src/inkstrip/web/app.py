@@ -36,7 +36,10 @@ _STRATEGY_LABELS = {
     "color_blue": "Blue ink",
     "color_any": "Any colored ink (red+blue+green)",
     "yolo_morph": "YOLOv8 detector (handwriting in any color, English-leaning)",
+    "ocr_inverse": "OCR inverse (black & white printed page with black handwriting)",
 }
+
+_OCR_ENGINE: dict[str, Any] = {}
 
 
 def _get_inpainter(device: str) -> LamaOnnxInpainter:
@@ -55,12 +58,22 @@ def _get_detector(device: str):
     return _DETECTOR[device]
 
 
+def _get_ocr_engine(device: str):
+    if device not in _OCR_ENGINE:
+        from inkstrip.detect.ocr_rapid import RapidOcrEngine
+
+        _log.info("loading RapidOCR engine for device=%s", device)
+        _OCR_ENGINE[device] = RapidOcrEngine(device=device if device != "auto" else "cpu")
+    return _OCR_ENGINE[device]
+
+
 def _process(
     image: Any,
     strategy_label: str,
     dilate_px: int,
     delta: int,
     protect_print: bool,
+    page_crop: bool,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
@@ -69,6 +82,16 @@ def _process(
 
     started = time.perf_counter()
     arr = load_image(image).array
+
+    crop_note = ""
+    if page_crop:
+        from inkstrip.preprocess.page_crop import auto_page_crop
+
+        arr, info = auto_page_crop(arr)
+        if info.warning:
+            crop_note = info.warning
+        elif info.cropped:
+            crop_note = f"page cropped (deskew {info.deskew_deg:+.1f}°)"
 
     if strategy == "yolo_morph":
         from inkstrip.mask.morph import MorphMaskBuilder
@@ -82,6 +105,15 @@ def _process(
         boxes = detector.detect(arr)
         mask = MorphMaskBuilder(cfg).build(arr, boxes)
         bbox_count = len(boxes)
+    elif strategy == "ocr_inverse":
+        from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
+
+        engine = _get_ocr_engine(device)
+        mask, bbox_count = detect_ocr_inverse_mask(
+            arr,
+            ocr_engine=engine,
+            dilate_px=int(dilate_px) if dilate_px > 0 else 5,
+        )
     else:
         profile = {"color_red": "red", "color_blue": "blue", "color_any": "any_colored"}[strategy]
         mask = detect_color_mask(
@@ -96,7 +128,10 @@ def _process(
     has_target = bool((mask > 0).any())
     if not has_target:
         cleaned = arr
-        note = "No handwriting detected for this strategy — try lowering delta or switching strategy."
+        if strategy == "ocr_inverse" and bbox_count == 0:
+            note = "OCR detected no printed text — output equals input (try a different strategy if this is a pure handwriting page)."
+        else:
+            note = "No handwriting detected for this strategy — try lowering delta or switching strategy."
     else:
         cleaned = _get_inpainter(device).inpaint(arr, mask)
         note = ""
@@ -109,6 +144,8 @@ def _process(
     if bbox_count:
         summary += f" · **{bbox_count} bbox**"
     summary += f" · **{elapsed:.0f} ms**"
+    if crop_note:
+        summary += f"\n\n_{crop_note}_"
     if note:
         summary += f"\n\n{note}"
     return cleaned, mask_rgb, summary
@@ -156,6 +193,10 @@ def build_ui():
                     value=True,
                     label="Protect printed text (skip black pixels even if dilated)",
                 )
+                page_crop_cb = gr.Checkbox(
+                    value=False,
+                    label="Auto-crop page (perspective-warp phone photos)",
+                )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
                     value="auto",
@@ -170,7 +211,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, strategy, dilate, delta, protect, device],
+            inputs=[inp, strategy, dilate, delta, protect, page_crop_cb, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 

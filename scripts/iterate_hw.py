@@ -18,7 +18,7 @@ from PIL import Image
 from inkstrip.config import InkstripConfig
 from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
-from inkstrip.mask.color import detect_color_mask
+from inkstrip.mask.color import detect_adaptive_mask, detect_color_mask
 
 SRC = Path("/mnt/e/downloads/hw.jpg")
 OUT_DIR = Path("eval_outputs")
@@ -36,6 +36,18 @@ def get_inpainter() -> LamaOnnxInpainter:
     return _INPAINTER
 
 
+_OCR_ENGINE = None
+
+
+def get_ocr_engine():
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        from inkstrip.detect.ocr_rapid import RapidOcrEngine
+
+        _OCR_ENGINE = RapidOcrEngine(device="cuda")
+    return _OCR_ENGINE
+
+
 def run_variant(
     tag: str,
     *,
@@ -43,16 +55,43 @@ def run_variant(
     dilate_px: int = 5,
     closing_px: int = 3,
     min_component_area: int = 12,
+    method: str = "fixed",
+    threshold: int = 50,
+    page_crop: bool = False,
 ) -> dict:
     img = load_image(SRC).array
+    if page_crop:
+        from inkstrip.preprocess.page_crop import auto_page_crop
+
+        img, _ = auto_page_crop(img)
     t0 = time.perf_counter()
-    mask = detect_color_mask(
-        img,
-        profile=profile,
-        dilate_px=dilate_px,
-        closing_px=closing_px,
-        min_component_area=min_component_area,
-    )
+    if method == "ocr_inverse":
+        from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
+
+        mask, _ = detect_ocr_inverse_mask(
+            img,
+            ocr_engine=get_ocr_engine(),
+            dilate_px=dilate_px,
+            closing_px=closing_px,
+            min_component_area=min_component_area,
+        )
+    elif method == "adaptive":
+        mask = detect_adaptive_mask(
+            img,
+            profile=profile,
+            threshold=threshold,
+            dilate_px=dilate_px,
+            closing_px=closing_px,
+            min_component_area=min_component_area,
+        )
+    else:
+        mask = detect_color_mask(
+            img,
+            profile=profile,
+            dilate_px=dilate_px,
+            closing_px=closing_px,
+            min_component_area=min_component_area,
+        )
     coverage = (mask > 0).mean()
     t1 = time.perf_counter()
     cleaned = get_inpainter().inpaint(img, mask)
@@ -97,9 +136,11 @@ def main() -> None:
         return
 
     # Default sweep
-    run_variant("v15_protect_d5", profile="red", dilate_px=5)
-    run_variant("v16_protect_d7", profile="red", dilate_px=7)
-    run_variant("v17_protect_d9", profile="red", dilate_px=9)
+    run_variant("v18_adaptive_t40_d7", method="adaptive", threshold=40, dilate_px=7)
+    run_variant("v19_adaptive_t50_d7", method="adaptive", threshold=50, dilate_px=7)
+    run_variant("v20_adaptive_t30_d7", method="adaptive", threshold=30, dilate_px=7)
+    run_variant("v21_ocr_inverse_d5", method="ocr_inverse", dilate_px=5)
+    run_variant("v22_ocr_inverse_d5_crop", method="ocr_inverse", dilate_px=5, page_crop=True)
 
 
 if __name__ == "__main__":

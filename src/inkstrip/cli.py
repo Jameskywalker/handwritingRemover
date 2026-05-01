@@ -37,6 +37,16 @@ def run(
     source: Path = typer.Argument(..., exists=True, readable=True, help="Input image or PDF."),
     output: Path = typer.Argument(..., help="Output path (PNG/JPG for images, PDF for PDFs)."),
     photo: bool = typer.Option(False, "--photo", help="Apply photo preprocessing (M2)."),
+    page_crop: Optional[bool] = typer.Option(
+        None,
+        "--page-crop/--no-page-crop",
+        help="Auto-detect and warp page quadrilateral. Default inherits from --photo.",
+    ),
+    strategy: str = typer.Option(
+        "color_red",
+        "--strategy",
+        help="Mask strategy: color_red | color_blue | color_any | yolo_morph | ocr_inverse.",
+    ),
     dpi: int = typer.Option(300, "--dpi", help="Render DPI for scanned PDFs (M2)."),
     device: str = typer.Option("auto", "--device", help="auto / cuda / cpu / mps."),
     inpainter: str = typer.Option("lama_onnx", "--inpainter", help="Inpainting backend."),
@@ -45,6 +55,8 @@ def run(
     """Remove handwriting from a single document."""
     cfg = InkstripConfig(
         photo_mode=photo,
+        page_crop=page_crop,
+        mask_strategy=strategy,  # type: ignore[arg-type]
         render_dpi=dpi,
         device=device,  # type: ignore[arg-type]
         inpainter=inpainter,  # type: ignore[arg-type]

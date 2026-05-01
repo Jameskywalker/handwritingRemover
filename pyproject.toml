@@ -50,6 +50,12 @@ pdf = [
     "img2pdf>=0.5",
     "deskew>=1.5",
 ]
+ocr = [
+    "rapidocr>=3.0",
+]
+photo = [
+    "deskew>=1.5",
+]
 ui = [
     "gradio>=4.40",
 ]
@@ -73,6 +79,7 @@ all = [
     "img2pdf>=0.5",
     "deskew>=1.5",
     "gradio>=4.40",
+    "rapidocr>=3.0",
 ]
 
 [project.scripts]
