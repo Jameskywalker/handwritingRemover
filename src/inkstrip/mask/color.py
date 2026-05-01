@@ -55,6 +55,91 @@ ANY_COLORED = "any_colored"
 _CHANNEL_IDX = {"R": 0, "G": 1, "B": 2}
 
 
+def estimate_paper_color(image: np.ndarray, percentile: int = 70) -> tuple[int, int, int]:
+    """Pick a representative paper RGB from the image's bright pixels.
+
+    Uses the median of pixels above the `percentile`-th gray-value cutoff so
+    we ignore printed text (dark) but include light shadows on paper.
+    """
+    gray = image.mean(axis=-1)
+    cutoff = np.percentile(gray, percentile)
+    bright = image[gray > cutoff]
+    if bright.size == 0:
+        return (255, 255, 255)
+    med = np.median(bright, axis=0)
+    return int(med[0]), int(med[1]), int(med[2])
+
+
+def detect_adaptive_mask(
+    image: np.ndarray,
+    *,
+    profile: str = "red",
+    threshold: int = 50,
+    edge_threshold: int | None = None,
+    dilate_px: int = 7,
+    closing_px: int = 3,
+    min_component_area: int = 12,
+    protect_print: bool = True,
+    print_threshold: int = 90,
+) -> np.ndarray:
+    """Adaptive color-ink detection that auto-calibrates to the page's paper.
+
+    Computes a "color signal" per pixel relative to the estimated paper RGB:
+        signal = (dom - paper_dom) + max(paper_rival - rival for rival in rivals)
+
+    Pure paper has signal ≈ 0; colored ink has high signal regardless of
+    whether the paper is bright white, off-white, or aged red. `threshold`
+    therefore generalizes across photos with different lighting / paper
+    color where a fixed-RGB rule wouldn't.
+    """
+    if profile not in PROFILES:
+        raise ValueError(f"unknown color profile {profile!r}")
+    rule = PROFILES[profile]
+    if edge_threshold is None:
+        edge_threshold = max(15, threshold // 2)
+
+    paper_r, paper_g, paper_b = estimate_paper_color(image)
+    paper_rgb = {"R": paper_r, "G": paper_g, "B": paper_b}
+
+    img32 = image.astype(np.int16)
+    dom = img32[..., _CHANNEL_IDX[rule.dominant]]
+    rivals_arr = [img32[..., _CHANNEL_IDX[r]] for r in rule.rivals]
+    paper_rivals = [paper_rgb[r] for r in rule.rivals]
+
+    dom_excess = dom - paper_rgb[rule.dominant]
+    rival_deficit = np.maximum.reduce([
+        paper_rivals[i] - rivals_arr[i] for i in range(len(rivals_arr))
+    ])
+    signal = dom_excess + rival_deficit
+
+    seed = signal >= threshold
+    candidate = signal >= edge_threshold
+
+    if edge_threshold < threshold:
+        seed_u8 = seed.astype(np.uint8) * 255
+        cand_u8 = candidate.astype(np.uint8) * 255
+        prev = np.zeros_like(seed_u8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        cur = seed_u8
+        for _ in range(20):
+            cur = cv2.bitwise_and(cv2.dilate(cur, kernel, iterations=1), cand_u8)
+            if np.array_equal(cur, prev):
+                break
+            prev = cur
+        mask = cur
+    else:
+        mask = seed.astype(np.uint8) * 255
+
+    return _post_process(
+        mask,
+        dilate_px=dilate_px,
+        closing_px=closing_px,
+        min_component_area=min_component_area,
+        image=image if protect_print else None,
+        print_threshold=print_threshold,
+    )
+
+
 def detect_color_mask(
     image: np.ndarray,
     *,
