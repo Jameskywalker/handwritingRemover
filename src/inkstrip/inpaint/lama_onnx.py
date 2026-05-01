@@ -146,7 +146,21 @@ def _pick(names: list[str], candidates: tuple[str, ...]) -> str:
 
 
 def _resolve_providers(device: str) -> list[str]:
+    """Pick ORT execution providers based on device hint and what's installed.
+
+    ORT silently warns when an unknown provider is named, so we only list
+    providers we know are available — picking from the install via
+    `ort.get_available_providers()`.
+    """
     if device == "cpu":
         return ["CPUExecutionProvider"]
-    # auto / cuda / mps: prefer CUDA, fall back. ONNX picks the first available.
-    return ["CUDAExecutionProvider", "CoreMLExecutionProvider", "CPUExecutionProvider"]
+    import onnxruntime as ort
+
+    available = set(ort.get_available_providers())
+    preferred: list[str] = []
+    if device in {"auto", "cuda"} and "CUDAExecutionProvider" in available:
+        preferred.append("CUDAExecutionProvider")
+    if device == "auto" and "CoreMLExecutionProvider" in available:
+        preferred.append("CoreMLExecutionProvider")
+    preferred.append("CPUExecutionProvider")
+    return preferred
