@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inkstrip"
+version = "0.1.0"
+description = "Remove handwritten ink, annotations, and notes from documents while preserving printed content."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "inkstrip contributors" }]
+keywords = ["handwriting", "inpainting", "document", "pdf", "ocr", "lama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "opencv-python-headless>=4.8",
+    "typer>=0.12",
+    "rich>=13.7",
+    "platformdirs>=4.0",
+    "huggingface_hub>=0.24",
+]
+
+[project.optional-dependencies]
+detect = [
+    "ultralytics>=8.2",
+    "torch>=2.1",
+]
+inpaint-torch = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "simple-lama-inpainting>=0.1.2",
+]
+inpaint-onnx = [
+    "onnxruntime>=1.17",
+]
+inpaint-onnx-gpu = [
+    "onnxruntime-gpu>=1.17",
+]
+pdf = [
+    "pymupdf>=1.24",
+    "pypdfium2>=4.25",
+    "pikepdf>=8.15",
+    "img2pdf>=0.5",
+    "deskew>=1.5",
+]
+gpu = [
+    "torch>=2.1",
+    "onnxruntime-gpu>=1.17",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+all = [
+    "ultralytics>=8.2",
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "simple-lama-inpainting>=0.1.2",
+    "onnxruntime>=1.17",
+    "pymupdf>=1.24",
+    "pypdfium2>=4.25",
+    "pikepdf>=8.15",
+    "img2pdf>=0.5",
+    "deskew>=1.5",
+]
+
+[project.scripts]
+inkstrip = "inkstrip.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+inkstrip = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

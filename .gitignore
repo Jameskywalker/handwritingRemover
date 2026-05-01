@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+src/*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.swp
+.DS_Store
+
+# generated / cached
+eval_outputs/
+tests/fixtures/_generated/
+weights_cache/
+
+# editor
+.vscode/
+.idea/
