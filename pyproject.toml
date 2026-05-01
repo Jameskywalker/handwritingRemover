@@ -37,15 +37,10 @@ detect = [
     "ultralytics>=8.2",
     "torch>=2.1",
 ]
-inpaint-torch = [
-    "torch>=2.1",
-    "torchvision>=0.16",
-    "simple-lama-inpainting>=0.1.2",
-]
-inpaint-onnx = [
+inpaint = [
     "onnxruntime>=1.17",
 ]
-inpaint-onnx-gpu = [
+inpaint-gpu = [
     "onnxruntime-gpu>=1.17",
 ]
 pdf = [
@@ -54,6 +49,9 @@ pdf = [
     "pikepdf>=8.15",
     "img2pdf>=0.5",
     "deskew>=1.5",
+]
+ui = [
+    "gradio>=4.40",
 ]
 gpu = [
     "torch>=2.1",
@@ -68,14 +66,13 @@ dev = [
 all = [
     "ultralytics>=8.2",
     "torch>=2.1",
-    "torchvision>=0.16",
-    "simple-lama-inpainting>=0.1.2",
     "onnxruntime>=1.17",
     "pymupdf>=1.24",
     "pypdfium2>=4.25",
     "pikepdf>=8.15",
     "img2pdf>=0.5",
     "deskew>=1.5",
+    "gradio>=4.40",
 ]
 
 [project.scripts]

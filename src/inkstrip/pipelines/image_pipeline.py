@@ -7,7 +7,7 @@ from typing import Any
 
 from inkstrip.config import InkstripConfig
 from inkstrip.detect.yolo_hw import YoloHandwritingDetector
-from inkstrip.inpaint.lama_torch import LamaTorchInpainter
+from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
 from inkstrip.io.savers import save_image
 from inkstrip.mask.morph import MorphMaskBuilder, mask_coverage
@@ -88,9 +88,6 @@ class ImagePipeline:
 
 
 def _make_inpainter(cfg: InkstripConfig):
-    if cfg.inpainter == "lama_torch":
-        return LamaTorchInpainter(cfg)
     if cfg.inpainter == "lama_onnx":
-        # TODO: implement in M3
-        raise NotImplementedError("lama_onnx backend lands in M3")
+        return LamaOnnxInpainter(cfg)
     raise ValueError(f"unknown inpainter: {cfg.inpainter!r}")

@@ -35,7 +35,7 @@ def _ensure_fixture() -> Path:
 def test_image_pipeline_runs_end_to_end(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     pytest.importorskip("ultralytics")
-    pytest.importorskip("simple_lama_inpainting")
+    pytest.importorskip("onnxruntime")
 
     from PIL import Image
 

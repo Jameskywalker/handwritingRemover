@@ -24,9 +24,11 @@ Pre-alpha. M1 (image pipeline) in progress.
 ## Quick start
 
 ```bash
-pip install -e ".[detect,inpaint-torch]"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[detect,inpaint,ui]"
 inkstrip download-weights
 inkstrip run input.jpg output.jpg
+inkstrip serve  # open the Gradio UI in a browser
 ```
 
 ## License
@@ -37,6 +39,6 @@ The default model weights (`big-lama`) are CC-BY-NC-SA. For commercial use you m
 
 ## Acknowledgements
 
-- LaMa inpainting: https://github.com/advimman/lama
+- LaMa inpainting: https://github.com/advimman/lama (ONNX export from `Carve/LaMa-ONNX`)
 - YOLOv8 handwriting detector: https://huggingface.co/armvectores/yolov8n_handwritten_text_detection
-- PyMuPDF, pypdfium2, pikepdf, img2pdf, simple-lama-inpainting, ultralytics
+- PyMuPDF, pypdfium2, pikepdf, img2pdf, ultralytics, onnxruntime, gradio

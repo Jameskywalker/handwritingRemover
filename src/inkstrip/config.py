@@ -41,7 +41,7 @@ class InkstripConfig:
     min_box_area: int = 20
 
     # inpainting
-    inpainter: Literal["lama_torch", "lama_onnx"] = "lama_torch"
+    inpainter: Literal["lama_onnx"] = "lama_onnx"
     tile_size: int = 512
     tile_overlap: int = 64
 

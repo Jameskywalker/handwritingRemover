@@ -16,7 +16,7 @@ from PIL import Image
 
 from inkstrip.config import InkstripConfig
 from inkstrip.detect.yolo_hw import YoloHandwritingDetector
-from inkstrip.inpaint.lama_torch import LamaTorchInpainter
+from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
 from inkstrip.mask.morph import MorphMaskBuilder
 
@@ -31,7 +31,7 @@ def main(src: Path) -> None:
     mask = MorphMaskBuilder(cfg).build(img, boxes)
     mask_rgb = np.stack([mask, mask, mask], axis=-1)
 
-    painted = LamaTorchInpainter(cfg).inpaint(img, mask) if boxes else img.copy()
+    painted = LamaOnnxInpainter(cfg).inpaint(img, mask) if boxes else img.copy()
 
     grid = np.concatenate([img, mask_rgb, painted], axis=1)
 

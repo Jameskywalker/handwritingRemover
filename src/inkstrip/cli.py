@@ -39,7 +39,7 @@ def run(
     photo: bool = typer.Option(False, "--photo", help="Apply photo preprocessing (M2)."),
     dpi: int = typer.Option(300, "--dpi", help="Render DPI for scanned PDFs (M2)."),
     device: str = typer.Option("auto", "--device", help="auto / cuda / cpu / mps."),
-    inpainter: str = typer.Option("lama_torch", "--inpainter", help="lama_torch or lama_onnx."),
+    inpainter: str = typer.Option("lama_onnx", "--inpainter", help="Inpainting backend."),
     quiet: bool = typer.Option(False, "--quiet", "-q"),
 ) -> None:
     """Remove handwriting from a single document."""
@@ -76,6 +76,23 @@ def download_weights(
     paths = prefetch_all(names=names)
     for n, p in paths.items():
         console.print(f"[green]{n}[/] → {p}")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(7860, "--port"),
+    share: bool = typer.Option(False, "--share", help="Create a public Gradio link."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser."),
+) -> None:
+    """Launch the Gradio demo UI."""
+    try:
+        from inkstrip.web.app import serve as _serve
+    except ImportError as e:
+        raise typer.BadParameter(
+            "Gradio not installed. Re-install with: pip install -e '.[ui]'"
+        ) from e
+    _serve(host=host, port=port, share=share, open_browser=not no_browser)
 
 
 if __name__ == "__main__":
