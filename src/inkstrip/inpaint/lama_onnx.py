@@ -7,13 +7,16 @@ Why ONNX (not PyTorch):
   with CUDAExecutionProvider on GPU
 - The repo `Carve/LaMa-ONNX` provides a pre-converted graph
 
-Carve/LaMa-ONNX I/O contract (verified at load time):
-- input "image": float32 NCHW, channel-first RGB in [0, 1], H/W must be % 8 == 0
-- input "mask":  float32 NCHW with 1 channel; 1.0 = repaint, 0.0 = keep
-- output: float32 NCHW [0, 1] of the inpainted image, same H/W as input
+Carve/LaMa-ONNX I/O contract (verified against IOPaint reference impl + the
+official Carve demo Space):
+- input "image": float32 NCHW, channel-first RGB in [0, 1]
+- input "mask":  float32 NCHW with 1 channel; >0 = repaint, 0 = keep
+- output: float32 NCHW already in [0, 255] (NOT [0, 1] — do not multiply by 255)
 
-Inputs are padded with reflect padding to the next multiple of 8; we crop the
-output back to the original size before returning.
+The original Carve export accepts arbitrary H/W as long as both are multiples
+of 8. We pad to the next multiple of 8 with reflect padding and crop the
+output back. If we hit a fixed-shape variant of the model we resize to its
+declared shape and resize back.
 """
 
 from __future__ import annotations
@@ -62,11 +65,22 @@ class LamaOnnxInpainter:
         _log.debug("loading LaMa ONNX from %s with providers=%s", weight, providers)
         self._session = ort.InferenceSession(str(weight), providers=providers)
 
-        input_names = [i.name for i in self._session.get_inputs()]
-        # Carve/LaMa-ONNX uses "image" and "mask"; some forks differ. Auto-resolve.
+        inputs = self._session.get_inputs()
+        input_names = [i.name for i in inputs]
         self._image_input = _pick(input_names, ("image", "img", "input"))
         self._mask_input = _pick(input_names, ("mask",))
         self._output = self._session.get_outputs()[0].name
+
+        # If the model has a fixed H/W (some Carve exports lock it to 512×512),
+        # remember it so we can resize each tile to that shape before inference.
+        img_shape = next(i.shape for i in inputs if i.name == self._image_input)
+        self._fixed_h: int | None = img_shape[2] if isinstance(img_shape[2], int) else None
+        self._fixed_w: int | None = img_shape[3] if isinstance(img_shape[3], int) else None
+        if self._fixed_h or self._fixed_w:
+            _log.info(
+                "model declares fixed input shape: H=%s W=%s; tiles will be resized.",
+                self._fixed_h, self._fixed_w,
+            )
 
     def inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         self._load()
@@ -80,15 +94,22 @@ class LamaOnnxInpainter:
 
     def _call_lama(self, sub_img: np.ndarray, sub_mask: np.ndarray) -> np.ndarray:
         assert self._session is not None
+        import cv2
+
         h, w = sub_img.shape[:2]
-        ph = _round_up(h, _PAD_MULTIPLE) - h
-        pw = _round_up(w, _PAD_MULTIPLE) - w
 
-        img_padded = np.pad(sub_img, ((0, ph), (0, pw), (0, 0)), mode="reflect")
-        mask_padded = np.pad(sub_mask, ((0, ph), (0, pw)), mode="constant")
+        if self._fixed_h and self._fixed_w:
+            net_img = cv2.resize(sub_img, (self._fixed_w, self._fixed_h), interpolation=cv2.INTER_AREA)
+            net_mask = cv2.resize(sub_mask, (self._fixed_w, self._fixed_h), interpolation=cv2.INTER_NEAREST)
+            ph = pw = 0
+        else:
+            ph = _round_up(h, _PAD_MULTIPLE) - h
+            pw = _round_up(w, _PAD_MULTIPLE) - w
+            net_img = np.pad(sub_img, ((0, ph), (0, pw), (0, 0)), mode="reflect")
+            net_mask = np.pad(sub_mask, ((0, ph), (0, pw)), mode="constant")
 
-        img_tensor = (img_padded.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
-        mask_tensor = (mask_padded > 127).astype(np.float32)[None, None, ...]
+        img_tensor = (net_img.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
+        mask_tensor = ((net_mask > 0).astype(np.float32))[None, None, ...]
 
         outputs = self._session.run(
             [self._output],
@@ -98,13 +119,15 @@ class LamaOnnxInpainter:
         if out.ndim == 4:
             out = out[0]
         out = out.transpose(1, 2, 0)
+        # Carve/LaMa-ONNX outputs values already in [0, 255]. Some forks output
+        # [0, 1]; detect by peeking at the max.
+        if float(out.max()) <= 1.5:
+            out = out * 255.0
+        out = np.clip(out, 0, 255).astype(np.uint8)
 
-        out = np.clip(out, 0.0, 1.0)
-        if out.max() <= 1.5:  # already normalized [0,1]
-            out = (out * 255.0).round().astype(np.uint8)
-        else:
-            out = np.clip(out, 0, 255).astype(np.uint8)
-
+        if self._fixed_h and self._fixed_w:
+            out = cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR)
+            return np.ascontiguousarray(out)
         return np.ascontiguousarray(out[:h, :w])
 
 
