@@ -55,6 +55,18 @@ class LamaOnnxInpainter:
             return
         import onnxruntime as ort
 
+        # onnxruntime-gpu 1.20+ ships a `preload_dlls()` helper that makes the
+        # CUDA / cuDNN .so files distributed in the matching `nvidia-*-cu12` PyPI
+        # packages findable. Without it, ORT crashes with
+        # "libcublasLt.so.12: cannot open shared object file" and silently
+        # falls back to CPU on systems where the vendored libs aren't on
+        # LD_LIBRARY_PATH (most pip installs).
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception as e:  # noqa: BLE001 — best-effort
+                _log.debug("preload_dlls failed: %s", e)
+
         weight = self._weight_path or get_weight(
             "lama_onnx",
             cache_dir=self.cfg.cache_dir,
