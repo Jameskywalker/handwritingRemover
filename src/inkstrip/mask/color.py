@@ -259,6 +259,20 @@ def _post_process(
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (closing_px, closing_px))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
 
+    # Filter speckle BEFORE dilating. The previous order (dilate → filter)
+    # let small ink-noise points get expanded past the area threshold and
+    # then survive — the user-visible symptom was "mask cleanly suppresses
+    # printed glyphs at dilate ≤ 3, but at dilate ≥ 4 the printed-text
+    # region suddenly fills with mask blobs". Doing the filter first means
+    # dilate only enlarges already-validated signal.
+    if min_component_area > 0:
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        keep = np.zeros_like(mask)
+        for i in range(1, n):
+            if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
+                keep[labels == i] = 255
+        mask = keep
+
     if dilate_px > 0:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_px, dilate_px))
         mask = cv2.dilate(mask, k, iterations=1)
@@ -275,14 +289,6 @@ def _post_process(
         chroma_low = (rgb_max - rgb_min) <= 25
         printed = (gray < print_threshold) & chroma_low
         mask = np.where(printed, 0, mask).astype(np.uint8)
-
-    if min_component_area > 0:
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        keep = np.zeros_like(mask)
-        for i in range(1, n):
-            if stats[i, cv2.CC_STAT_AREA] >= min_component_area:
-                keep[labels == i] = 255
-        mask = keep
 
     return mask
 
