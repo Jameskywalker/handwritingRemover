@@ -52,8 +52,8 @@ class InkstripConfig:
     OCR recognises Chinese handwriting as printed text and erases it.
     Weights: armvectores/yolov8n_handwritten_text_detection (~6 MB)."""
 
-    ocr_hw_conf: float = 0.40
-    ocr_hw_imgsz: int = 1280
+    ocr_hw_conf: float = 0.25
+    ocr_hw_imgsz: int = 1600
     ocr_hw_overlap_threshold: float = 0.30
     """An OCR bbox is treated as handwriting (and excluded from the printed
     subtraction) if any HW bbox overlaps it by ≥ this fraction of the

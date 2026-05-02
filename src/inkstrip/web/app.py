@@ -51,9 +51,12 @@ def _get_hw_classifier(device: str):
     if device not in _HW_CLASSIFIER:
         from inkstrip.detect.hw_classifier import YoloHwClassifier
 
+        cfg = InkstripConfig(device=device)  # type: ignore[arg-type]
         _log.info("loading YOLOv8n HW classifier for device=%s", device)
         _HW_CLASSIFIER[device] = YoloHwClassifier(
-            device=device if device != "auto" else "cpu"
+            device=device if device != "auto" else "cpu",
+            conf=cfg.ocr_hw_conf,
+            imgsz=cfg.ocr_hw_imgsz,
         )
     return _HW_CLASSIFIER[device]
 
@@ -63,6 +66,7 @@ def _process(
     dilate_px: int,
     page_crop: bool,
     use_hw_classifier: bool,
+    inpainter_choice: str,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
@@ -93,6 +97,7 @@ def _process(
     )
 
     has_target = bool((mask > 0).any())
+    effective_mask = mask
     if not has_target:
         cleaned = arr
         note = (
@@ -101,14 +106,36 @@ def _process(
             else "Mask is empty — handwriting may have been fully covered by the printed mask."
         )
     else:
-        cleaned = _get_inpainter(device).inpaint(arr, mask)
+        if inpainter_choice == "paper_fill":
+            from inkstrip.inpaint.paper_fill import PaperFillInpainter
+
+            painter = PaperFillInpainter(
+                InkstripConfig(device=device),  # type: ignore[arg-type]
+                hw_classifier=hw_classifier,
+            )
+            cleaned = painter.inpaint(arr, mask)
+            if painter.last_effective_mask is not None:
+                effective_mask = painter.last_effective_mask
+        else:
+            cleaned = _get_inpainter(device).inpaint(arr, mask)
         note = ""
 
     elapsed = (time.perf_counter() - started) * 1000
     cov = mask_coverage(mask) * 100
 
-    mask_rgb = np.stack([mask, mask, mask], axis=-1)
-    summary = f"**mask coverage** {cov:.2f}% · **{bbox_count} printed bbox** · **{elapsed:.0f} ms**"
+    # Mask preview: input with the mask region the inpainter ACTUALLY used
+    # overlaid in red. For paper-fill that's the narrowed (hw_box ∪ color)
+    # zone, not the raw OCR-inverse mask — areas outside the narrowed zone
+    # would otherwise show red but never get cleaned, which is confusing.
+    mask_rgb = arr.copy()
+    mask_rgb[effective_mask > 0] = (
+        0.4 * mask_rgb[effective_mask > 0] + 0.6 * np.array([255, 0, 0])
+    ).astype(np.uint8)
+    eff_cov = (effective_mask > 0).mean() * 100
+    summary = (
+        f"**input shape** {arr.shape[:2]} · **mask coverage** {cov:.2f}% "
+        f"(effective {eff_cov:.2f}%) · **{bbox_count} printed bbox** · **{elapsed:.0f} ms**"
+    )
     if crop_note:
         summary += f"\n\n_{crop_note}_"
     if note:
@@ -150,6 +177,12 @@ def build_ui():
                     value=True,
                     label="HW classifier (rescue same-color handwriting OCR mistook for printed text)",
                 )
+                inpainter_dd = gr.Radio(
+                    choices=[("LaMa (deep, slow, ~5 s)", "lama"),
+                             ("Paper-fill (classical, fast, ~50 ms)", "paper_fill")],
+                    value="lama",
+                    label="Inpainter",
+                )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
                     value="auto",
@@ -164,7 +197,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, dilate, page_crop_cb, hw_classifier_cb, device],
+            inputs=[inp, dilate, page_crop_cb, hw_classifier_cb, inpainter_dd, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 
