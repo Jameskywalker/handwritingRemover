@@ -1,8 +1,7 @@
 """Gradio demo: upload an image, see handwriting removed.
 
-Single strategy: OCR finds printed text, the handwriting classifier
-rescues bboxes OCR mistook for printed text, and the inverse of that
-becomes the mask. Sliders expose only what's worth tweaking.
+Single pipeline: auto-crop page → OCR finds printed text → HW classifier
+flags handwriting bboxes OCR mistook for printed → inverse mask → paper-fill.
 
 Run:
     inkstrip serve            # http://127.0.0.1:7860
@@ -17,25 +16,15 @@ from typing import Any
 import numpy as np
 
 from inkstrip.config import InkstripConfig
-from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
 from inkstrip.mask.morph import mask_coverage
 from inkstrip.utils.logging import get_logger
 
 _log = get_logger("web")
 
-# Cache heavy components by device — first request warms them, subsequent
-# requests reuse.
-_INPAINTER: dict[str, LamaOnnxInpainter] = {}
 _OCR_ENGINE: dict[str, Any] = {}
 _HW_CLASSIFIER: dict[str, Any] = {}
-
-
-def _get_inpainter(device: str) -> LamaOnnxInpainter:
-    if device not in _INPAINTER:
-        _log.info("loading LaMa ONNX inpainter for device=%s", device)
-        _INPAINTER[device] = LamaOnnxInpainter(InkstripConfig(device=device))
-    return _INPAINTER[device]
+_RESNET_CLASSIFIER: dict[str, Any] = {}
 
 
 def _get_ocr_engine(device: str):
@@ -52,7 +41,7 @@ def _get_hw_classifier(device: str):
         from inkstrip.detect.hw_classifier import YoloHwClassifier
 
         cfg = InkstripConfig(device=device)  # type: ignore[arg-type]
-        _log.info("loading YOLOv8n HW classifier for device=%s", device)
+        _log.info("loading YOLOv8n HW classifier device=%s", device)
         _HW_CLASSIFIER[device] = YoloHwClassifier(
             device=device if device != "auto" else "cpu",
             conf=cfg.ocr_hw_conf,
@@ -61,12 +50,26 @@ def _get_hw_classifier(device: str):
     return _HW_CLASSIFIER[device]
 
 
+def _get_resnet_classifier(device: str):
+    if device not in _RESNET_CLASSIFIER:
+        from inkstrip.detect.hw_finetuned import ResNetHwClassifier
+
+        _log.info("loading fine-tuned ResNet18 HW classifier device=%s", device)
+        try:
+            _RESNET_CLASSIFIER[device] = ResNetHwClassifier(
+                device=device if device != "auto" else "cpu",
+            )
+        except FileNotFoundError as e:
+            _log.warning("ResNet HW classifier disabled: %s", e)
+            _RESNET_CLASSIFIER[device] = None
+    return _RESNET_CLASSIFIER[device]
+
+
 def _process(
     image: Any,
     dilate_px: int,
-    page_crop: bool,
     use_hw_classifier: bool,
-    inpainter_choice: str,
+    use_resnet_classifier: bool,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
@@ -75,24 +78,25 @@ def _process(
     started = time.perf_counter()
     arr = load_image(image).array
 
-    crop_note = ""
-    if page_crop:
-        from inkstrip.preprocess.page_crop import auto_page_crop
+    from inkstrip.preprocess.page_crop import auto_page_crop
 
-        arr, info = auto_page_crop(arr)
-        if info.warning:
-            crop_note = info.warning
-        elif info.cropped:
-            crop_note = f"page cropped (deskew {info.deskew_deg:+.1f}°)"
+    arr, crop_info = auto_page_crop(arr)
+    crop_note = ""
+    if crop_info.warning:
+        crop_note = crop_info.warning
+    elif crop_info.cropped:
+        crop_note = f"page cropped (deskew {crop_info.deskew_deg:+.1f}°)"
 
     from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
 
     engine = _get_ocr_engine(device)
     hw_classifier = _get_hw_classifier(device) if use_hw_classifier else None
-    mask, bbox_count = detect_ocr_inverse_mask(
+    resnet_classifier = _get_resnet_classifier(device) if use_resnet_classifier else None
+    mask, bbox_count, hw_voted_ocr_rects = detect_ocr_inverse_mask(
         arr,
         ocr_engine=engine,
         hw_classifier=hw_classifier,
+        resnet_classifier=resnet_classifier,
         dilate_px=int(dilate_px) if dilate_px > 0 else 5,
     )
 
@@ -106,27 +110,20 @@ def _process(
             else "Mask is empty — handwriting may have been fully covered by the printed mask."
         )
     else:
-        if inpainter_choice == "paper_fill":
-            from inkstrip.inpaint.paper_fill import PaperFillInpainter
+        from inkstrip.inpaint.paper_fill import PaperFillInpainter
 
-            painter = PaperFillInpainter(
-                InkstripConfig(device=device),  # type: ignore[arg-type]
-                hw_classifier=hw_classifier,
-            )
-            cleaned = painter.inpaint(arr, mask)
-            if painter.last_effective_mask is not None:
-                effective_mask = painter.last_effective_mask
-        else:
-            cleaned = _get_inpainter(device).inpaint(arr, mask)
+        painter = PaperFillInpainter(
+            InkstripConfig(device=device),  # type: ignore[arg-type]
+            hw_classifier=hw_classifier,
+        )
+        cleaned = painter.inpaint(arr, mask, extra_hw_rects=hw_voted_ocr_rects)
+        if painter.last_effective_mask is not None:
+            effective_mask = painter.last_effective_mask
         note = ""
 
     elapsed = (time.perf_counter() - started) * 1000
     cov = mask_coverage(mask) * 100
 
-    # Mask preview: input with the mask region the inpainter ACTUALLY used
-    # overlaid in red. For paper-fill that's the narrowed (hw_box ∪ color)
-    # zone, not the raw OCR-inverse mask — areas outside the narrowed zone
-    # would otherwise show red but never get cleaned, which is confusing.
     mask_rgb = arr.copy()
     mask_rgb[effective_mask > 0] = (
         0.4 * mask_rgb[effective_mask > 0] + 0.6 * np.array([255, 0, 0])
@@ -150,9 +147,9 @@ def build_ui():
         gr.Markdown(
             "# inkstrip\n"
             "Upload a page with handwritten ink on printed content. "
-            "OCR finds the printed text; a YOLOv8 handwriting classifier "
-            "rescues bboxes OCR mistook for printed text; the inverse is "
-            "the handwriting mask, which gets inpainted away."
+            "Page is auto-cropped, OCR finds the printed text, the YOLOv8 "
+            "handwriting classifier rescues bboxes OCR mistook for printed "
+            "text, and the inverse becomes the mask — then paper-fill."
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -169,19 +166,13 @@ def build_ui():
                     step=1,
                     label="Mask dilation (px)",
                 )
-                page_crop_cb = gr.Checkbox(
-                    value=False,
-                    label="Auto-crop page (perspective-warp phone photos)",
-                )
                 hw_classifier_cb = gr.Checkbox(
                     value=True,
-                    label="HW classifier (rescue same-color handwriting OCR mistook for printed text)",
+                    label="HW classifier (YOLOv8n)",
                 )
-                inpainter_dd = gr.Radio(
-                    choices=[("LaMa (deep, slow, ~5 s)", "lama"),
-                             ("Paper-fill (classical, fast, ~50 ms)", "paper_fill")],
-                    value="lama",
-                    label="Inpainter",
+                resnet_classifier_cb = gr.Checkbox(
+                    value=True,
+                    label="Fine-tuned classifier (ResNet18 — catches neat handwriting YOLO misses)",
                 )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
@@ -197,7 +188,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, dilate, page_crop_cb, hw_classifier_cb, inpainter_dd, device],
+            inputs=[inp, dilate, hw_classifier_cb, resnet_classifier_cb, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 

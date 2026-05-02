@@ -49,6 +49,8 @@ class YoloHwClassifier:
         conf: float = 0.40,
         imgsz: int = 1280,
         augment: bool = True,
+        tile_size: int = 0,
+        tile_overlap: int = 200,
     ) -> None:
         try:
             from ultralytics import YOLO  # type: ignore
@@ -73,10 +75,18 @@ class YoloHwClassifier:
         self._conf = float(conf)
         self._imgsz = int(imgsz)
         self._augment = bool(augment)
+        self._tile_size = int(tile_size)
+        self._tile_overlap = int(tile_overlap)
 
     def detect(self, image: np.ndarray) -> list[HwBox]:
-        # ultralytics expects BGR; we receive RGB
         bgr = image[..., ::-1] if image.ndim == 3 and image.shape[2] == 3 else image
+        if self._tile_size > 0:
+            full = self._predict_full(bgr)
+            tiled = self._predict_tiled(bgr, self._tile_size, self._tile_overlap)
+            return self._merge_with_nms(full + tiled)
+        return self._predict_full(bgr)
+
+    def _predict_full(self, bgr: np.ndarray) -> list[HwBox]:
         result = self._model.predict(
             bgr,
             conf=self._conf,
@@ -97,6 +107,51 @@ class YoloHwClassifier:
                 continue
             out.append(HwBox(bbox=(x, y, w, h), score=float(s)))
         return out
+
+    def _predict_tiled(
+        self, bgr: np.ndarray, tile_size: int, overlap: int
+    ) -> list[HwBox]:
+        h, w = bgr.shape[:2]
+        step = max(1, tile_size - overlap)
+        out: list[HwBox] = []
+        for y0 in range(0, max(1, h - overlap), step):
+            for x0 in range(0, max(1, w - overlap), step):
+                y1 = min(h, y0 + tile_size)
+                x1 = min(w, x0 + tile_size)
+                tile = bgr[y0:y1, x0:x1]
+                if tile.shape[0] < 100 or tile.shape[1] < 100:
+                    continue
+                r = self._model.predict(
+                    tile,
+                    conf=self._conf,
+                    imgsz=self._imgsz,
+                    device=self._device,
+                    verbose=False,
+                    augment=False,
+                )[0]
+                if r.boxes is None or len(r.boxes) == 0:
+                    continue
+                xyxy = r.boxes.xyxy.cpu().numpy()
+                scs = r.boxes.conf.cpu().numpy()
+                for (a, b, c, d), s in zip(xyxy, scs):
+                    out.append(
+                        HwBox((int(a + x0), int(b + y0), int(c - a), int(d - b)), float(s))
+                    )
+        return out
+
+    def _merge_with_nms(self, boxes: list[HwBox]) -> list[HwBox]:
+        if not boxes:
+            return []
+        import cv2 as _cv2
+        rects = [list(b.bbox) for b in boxes]
+        scores = [b.score for b in boxes]
+        keep = _cv2.dnn.NMSBoxes(
+            bboxes=rects, scores=scores,
+            score_threshold=self._conf, nms_threshold=0.45,
+        )
+        if hasattr(keep, "flatten"):
+            keep = keep.flatten()
+        return [boxes[int(i)] for i in keep]
 
 
 def hw_box_mask(

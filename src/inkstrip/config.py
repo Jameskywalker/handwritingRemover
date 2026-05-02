@@ -39,7 +39,7 @@ class InkstripConfig:
     ocr_min_confidence: float = 0.30
     ocr_printed_pad_px: int = 4
     ocr_printed_dilate_px: int = 2
-    ocr_combine_color: bool = True
+    ocr_combine_color: bool = False
     """Combine ocr_inverse with a coloured-ink layer. Coloured pixels bypass
     the OCR-printed veto, fixing the failure case where OCR recognises
     coloured handwriting as text and subtracts it from the mask. Set False
@@ -55,6 +55,15 @@ class InkstripConfig:
     ocr_hw_conf: float = 0.25
     ocr_hw_imgsz: int = 1600
     ocr_hw_overlap_threshold: float = 0.30
+
+    ocr_use_resnet_classifier: bool = True
+    """Run a fine-tuned ResNet18 binary classifier (HW vs printed) on every
+    OCR bbox crop. Catches neat handwriting (e.g. clean answer cells like
+    "①童年的我") that the YOLO HW detector misses entirely. Weights at
+    weights/resnet18_hw_classifier.pt — train via
+    scripts/train_resnet_hw_classifier.py."""
+
+    ocr_resnet_threshold: float = 0.50
     """An OCR bbox is treated as handwriting (and excluded from the printed
     subtraction) if any HW bbox overlaps it by ≥ this fraction of the
     smaller of the two boxes' areas."""

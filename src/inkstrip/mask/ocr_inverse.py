@@ -34,6 +34,7 @@ from inkstrip.mask.color import _post_process
 if TYPE_CHECKING:
     from inkstrip.config import InkstripConfig
     from inkstrip.detect.hw_classifier import HwClassifier
+    from inkstrip.detect.hw_finetuned import ResNetHwClassifier
     from inkstrip.detect.ocr_rapid import OcrEngine
 
 
@@ -42,18 +43,27 @@ def _ocr_box_is_handwriting(
     hw_rects: list[tuple[int, int, int, int]],
     *,
     threshold: float = 0.30,
+    resnet_classifier: "ResNetHwClassifier | None" = None,
+    resnet_threshold: float = 0.5,
+    image: np.ndarray | None = None,
 ) -> bool:
-    """True if the **union** of HW rects covers ≥ threshold of the OCR rect.
+    """Decide whether an OCR bbox is handwriting.
 
-    Using union/OCR instead of inter / min(areas) prevents a single small
-    HW bbox from flipping an entire long printed-text line into "handwriting"
-    just because the small box sat fully inside it. We require enough hw
-    coverage to plausibly be the dominant content of that OCR region.
+    Two pieces of evidence, ``OR``-ed:
+
+    1. **YOLO union vote** — the union of HW classifier bboxes covers
+       ≥ ``threshold`` of the OCR rect.
+    2. **Fine-tuned ResNet** (optional) — if a ``resnet_classifier`` is
+       supplied, the OCR bbox crop is fed through it and a handwriting
+       probability ≥ ``resnet_threshold`` flips the bbox to handwriting.
+       Catches neat handwriting (e.g. clean answer-cell strokes that look
+       print-like to YOLO) where the YOLO classifier doesn't fire at all.
     """
     pts = poly.astype(np.int32).reshape(-1, 2)
     ox, oy, ow, oh = cv2.boundingRect(pts)
     if ow <= 0 or oh <= 0:
         return False
+
     canvas = np.zeros((oh, ow), dtype=bool)
     for hx, hy, hw_, hh in hw_rects:
         ix0 = max(0, hx - ox)
@@ -62,7 +72,14 @@ def _ocr_box_is_handwriting(
         iy1 = min(oh, hy + hh - oy)
         if ix1 > ix0 and iy1 > iy0:
             canvas[iy0:iy1, ix0:ix1] = True
-    return canvas.sum() / (ow * oh) >= threshold
+    if canvas.sum() / (ow * oh) >= threshold:
+        return True
+
+    if resnet_classifier is not None and image is not None:
+        prob = resnet_classifier.predict(image, poly)
+        if prob >= resnet_threshold:
+            return True
+    return False
 
 
 def _build_ink_mask(image: np.ndarray, block_size: int, C: int) -> np.ndarray:
@@ -137,7 +154,9 @@ def detect_ocr_inverse_mask(
     color_dilate_px: int = 5,
     hw_classifier: "HwClassifier | None" = None,
     hw_overlap_threshold: float = 0.30,
-) -> tuple[np.ndarray, int]:
+    resnet_classifier: "ResNetHwClassifier | None" = None,
+    resnet_threshold: float = 0.5,
+) -> tuple[np.ndarray, int, list[tuple[int, int, int, int]]]:
     """Build a handwriting mask using OCR to localise printed text.
 
     With ``combine_color=True`` (default) the result is
@@ -164,16 +183,26 @@ def detect_ocr_inverse_mask(
     # bbox significantly. Operating on bboxes (not pixels) avoids the trap
     # where the HW bbox covers some printed glyphs underneath and ends up
     # protecting them too.
-    if hw_classifier is not None and accepted_boxes:
-        hw_boxes = hw_classifier.detect(image)
-        if hw_boxes:
-            hw_rects = [b.bbox for b in hw_boxes]
-            kept = []
-            for ob in accepted_boxes:
-                if _ocr_box_is_handwriting(ob.poly, hw_rects, threshold=hw_overlap_threshold):
-                    continue
-                kept.append(ob)
-            accepted_boxes = kept
+    hw_voted_ocr_rects: list[tuple[int, int, int, int]] = []
+    if (hw_classifier is not None or resnet_classifier is not None) and accepted_boxes:
+        hw_rects: list[tuple[int, int, int, int]] = []
+        if hw_classifier is not None:
+            hw_rects = [b.bbox for b in hw_classifier.detect(image)]
+        kept = []
+        for ob in accepted_boxes:
+            if _ocr_box_is_handwriting(
+                ob.poly,
+                hw_rects,
+                threshold=hw_overlap_threshold,
+                resnet_classifier=resnet_classifier,
+                resnet_threshold=resnet_threshold,
+                image=image,
+            ):
+                pts = ob.poly.astype(np.int32).reshape(-1, 2)
+                hw_voted_ocr_rects.append(cv2.boundingRect(pts))
+                continue
+            kept.append(ob)
+        accepted_boxes = kept
 
     accepted = [b.poly for b in accepted_boxes]
 
@@ -197,8 +226,8 @@ def detect_ocr_inverse_mask(
         # layer, that *is* the handwriting mask; otherwise return empty so
         # the pipeline emits a warning rather than erasing the whole page.
         if combine_color and color_layer.any():
-            return color_layer, 0
-        return np.zeros((h, w), dtype=np.uint8), 0
+            return color_layer, 0, hw_voted_ocr_rects
+        return np.zeros((h, w), dtype=np.uint8), 0, hw_voted_ocr_rects
 
     printed_mask = _build_printed_glyph_mask(
         image,
@@ -224,7 +253,7 @@ def detect_ocr_inverse_mask(
         min_component_area=min_component_area,
         image=None,  # printed text already subtracted; do not re-protect
     )
-    return final, len(accepted)
+    return final, len(accepted), hw_voted_ocr_rects
 
 
 class OcrInverseMaskBuilder:
@@ -235,6 +264,7 @@ class OcrInverseMaskBuilder:
         cfg: "InkstripConfig",
         ocr_engine: "OcrEngine | None" = None,
         hw_classifier: "HwClassifier | None" = None,
+        resnet_classifier: "ResNetHwClassifier | None" = None,
     ) -> None:
         self.cfg = cfg
         if ocr_engine is None:
@@ -258,11 +288,12 @@ class OcrInverseMaskBuilder:
                 imgsz=cfg.ocr_hw_imgsz,
             )
         self._hw_classifier = hw_classifier
+        self._resnet_classifier = resnet_classifier
 
     def build(self, image: np.ndarray, boxes=None) -> tuple[np.ndarray, int]:
         cfg = self.cfg
         dilate_px = cfg.dilate_px if cfg.dilate_px is not None else 5
-        return detect_ocr_inverse_mask(
+        mask, n, hw_voted = detect_ocr_inverse_mask(
             image,
             ocr_engine=self._engine,
             printed_pad_px=cfg.ocr_printed_pad_px,
@@ -274,4 +305,8 @@ class OcrInverseMaskBuilder:
             min_component_area=cfg.min_box_area,
             hw_classifier=self._hw_classifier,
             hw_overlap_threshold=cfg.ocr_hw_overlap_threshold,
+            resnet_classifier=self._resnet_classifier,
+            resnet_threshold=cfg.ocr_resnet_threshold,
         )
+        self.last_hw_voted_ocr_rects = hw_voted
+        return mask, n

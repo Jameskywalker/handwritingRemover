@@ -21,6 +21,7 @@ eval_outputs/
 tests/fixtures/_generated/
 weights_cache/
 weights/
+data/
 
 # editor
 .vscode/

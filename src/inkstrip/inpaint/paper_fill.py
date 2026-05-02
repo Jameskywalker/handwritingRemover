@@ -39,7 +39,7 @@ class PaperFillInpainter:
         cfg: "InkstripConfig",
         *,
         hw_classifier: "HwClassifier | None" = None,
-        hw_box_dilate_px: int = 21,
+        hw_box_dilate_px: int = 35,
         paper_threshold_offset: int = 25,
         sample_ksize: int = 51,
         min_samples: int = 30,
@@ -52,13 +52,19 @@ class PaperFillInpainter:
         self.min_samples = int(min_samples)
         self.last_effective_mask: np.ndarray | None = None
 
-    def inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    def inpaint(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        *,
+        extra_hw_rects: list[tuple[int, int, int, int]] | None = None,
+    ) -> np.ndarray:
         if image.dtype != np.uint8:
             raise ValueError("image must be uint8")
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError("image must be HxWx3 RGB")
 
-        confident = self._narrow_mask(image, mask)
+        confident = self._narrow_mask(image, mask, extra_hw_rects or [])
         self.last_effective_mask = confident
         return _paper_fill(
             image,
@@ -68,36 +74,31 @@ class PaperFillInpainter:
             min_samples=self.min_samples,
         )
 
-    def _narrow_mask(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        from inkstrip.mask.color import detect_color_mask
-
+    def _narrow_mask(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        extra_hw_rects: list[tuple[int, int, int, int]],
+    ) -> np.ndarray:
         h, w = image.shape[:2]
-        # 1. coloured ink — always confident
-        color_layer = detect_color_mask(
-            image,
-            profile="any_colored",
-            dilate_px=5,
-            closing_px=3,
-            min_component_area=12,
-            protect_print=True,
-        )
-        # 2. handwriting bboxes — confident
         hw_layer = np.zeros((h, w), dtype=np.uint8)
         if self.hw_classifier is not None:
             for box in self.hw_classifier.detect(image):
                 x, y, bw, bh = box.bbox
                 hw_layer[y : y + bh, x : x + bw] = 255
-            if self.hw_box_dilate_px > 0:
-                k = cv2.getStructuringElement(
-                    cv2.MORPH_ELLIPSE,
-                    (self.hw_box_dilate_px, self.hw_box_dilate_px),
-                )
-                hw_layer = cv2.dilate(hw_layer, k, iterations=1)
-
-        zone = cv2.bitwise_or(hw_layer, color_layer)
-        narrowed = cv2.bitwise_and(mask, zone)
-        # always include color_layer (even if it slipped past the input mask)
-        return cv2.bitwise_or(narrowed, color_layer)
+        # Extra rects from upstream signal (e.g. ResNet-voted OCR bboxes)
+        for x, y, bw, bh in extra_hw_rects:
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(w, x + bw), min(h, y + bh)
+            if x1 > x0 and y1 > y0:
+                hw_layer[y0:y1, x0:x1] = 255
+        if self.hw_box_dilate_px > 0:
+            k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (self.hw_box_dilate_px, self.hw_box_dilate_px),
+            )
+            hw_layer = cv2.dilate(hw_layer, k, iterations=1)
+        return cv2.bitwise_and(mask, hw_layer)
 
 
 def _paper_fill(

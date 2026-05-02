@@ -66,7 +66,7 @@ def test_handwriting_kept_printed_subtracted():
     img, printed, scribble_mask, _ = _make_synthetic_page()
     boxes = [OcrBox(_bbox_to_poly(r), text="x", score=0.99) for r in printed]
     engine = _FakeEngine(boxes)
-    mask, n = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=False)
+    mask, n, _ = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=False)
     assert n == 2
 
     overlap = ((mask > 0) & (scribble_mask > 0)).sum()
@@ -80,7 +80,7 @@ def test_handwriting_kept_printed_subtracted():
 def test_zero_printed_returns_empty_mask_strict():
     img, _, _, _ = _make_synthetic_page()
     engine = _FakeEngine([])
-    mask, n = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=False)
+    mask, n, _ = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=False)
     assert n == 0
     assert mask.sum() == 0
 
@@ -89,7 +89,7 @@ def test_low_confidence_boxes_filtered_strict():
     img, printed, _, _ = _make_synthetic_page()
     boxes = [OcrBox(_bbox_to_poly(r), text="x", score=0.10) for r in printed]
     engine = _FakeEngine(boxes)
-    mask, n = detect_ocr_inverse_mask(
+    mask, n, _ = detect_ocr_inverse_mask(
         img, ocr_engine=engine, min_confidence=0.30, combine_color=False
     )
     assert n == 0
@@ -128,7 +128,7 @@ def test_color_handwriting_bypasses_ocr_veto():
     boxes = [OcrBox(_bbox_to_poly(r), text="x", score=0.99) for r in printed + fake_handwriting_bboxes]
     engine = _FakeEngine(boxes)
 
-    mask, n = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=True)
+    mask, n, _ = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=True)
     assert n == 4
 
     # Pure ocr_inverse would zero out the scribbles. combine_color must keep them.
@@ -157,7 +157,7 @@ def test_hw_classifier_rescues_handwriting_misclassified_by_ocr():
     # HW classifier (mocked) flags only the scribbles.
     hw = _FakeHwClassifier([HwBox(bbox=r, score=0.90) for r in scribble_rects])
 
-    mask, n = detect_ocr_inverse_mask(
+    mask, n, _ = detect_ocr_inverse_mask(
         img, ocr_engine=engine, hw_classifier=hw, combine_color=False
     )
     # Only the 2 real printed bboxes remain after HW filtering.
@@ -180,7 +180,7 @@ def test_hw_classifier_no_overlap_does_not_rescue_anything():
     engine = _FakeEngine(boxes)
     hw = _FakeHwClassifier([HwBox(bbox=(700, 550, 50, 30), score=0.90)])
 
-    mask, n = detect_ocr_inverse_mask(
+    mask, n, _ = detect_ocr_inverse_mask(
         img, ocr_engine=engine, hw_classifier=hw, combine_color=False
     )
     # All printed bboxes still classified as printed.
@@ -193,7 +193,7 @@ def test_hw_classifier_no_overlap_does_not_rescue_anything():
 def test_zero_printed_keeps_color_layer_when_combined():
     img, _, scribble_mask = _make_synthetic_page_with_colored_handwriting()
     engine = _FakeEngine([])  # OCR finds nothing
-    mask, n = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=True)
+    mask, n, _ = detect_ocr_inverse_mask(img, ocr_engine=engine, combine_color=True)
     assert n == 0
     overlap = ((mask > 0) & (scribble_mask > 0)).sum()
     assert overlap / max(1, (scribble_mask > 0).sum()) > 0.80
