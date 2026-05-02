@@ -43,9 +43,8 @@ def _ocr_box_is_handwriting(
     hw_rects: list[tuple[int, int, int, int]],
     *,
     threshold: float = 0.30,
-    resnet_classifier: "ResNetHwClassifier | None" = None,
+    resnet_prob: float | None = None,
     resnet_threshold: float = 0.5,
-    image: np.ndarray | None = None,
 ) -> bool:
     """Decide whether an OCR bbox is handwriting.
 
@@ -53,11 +52,10 @@ def _ocr_box_is_handwriting(
 
     1. **YOLO union vote** — the union of HW classifier bboxes covers
        ≥ ``threshold`` of the OCR rect.
-    2. **Fine-tuned ResNet** (optional) — if a ``resnet_classifier`` is
-       supplied, the OCR bbox crop is fed through it and a handwriting
-       probability ≥ ``resnet_threshold`` flips the bbox to handwriting.
-       Catches neat handwriting (e.g. clean answer-cell strokes that look
-       print-like to YOLO) where the YOLO classifier doesn't fire at all.
+    2. **Fine-tuned ResNet** (optional) — if a ``resnet_prob`` is supplied
+       (precomputed in batch by the caller), values ≥ ``resnet_threshold``
+       flip the bbox to handwriting. Catches neat handwriting where YOLO
+       didn't fire at all.
     """
     pts = poly.astype(np.int32).reshape(-1, 2)
     ox, oy, ow, oh = cv2.boundingRect(pts)
@@ -75,10 +73,8 @@ def _ocr_box_is_handwriting(
     if canvas.sum() / (ow * oh) >= threshold:
         return True
 
-    if resnet_classifier is not None and image is not None:
-        prob = resnet_classifier.predict(image, poly)
-        if prob >= resnet_threshold:
-            return True
+    if resnet_prob is not None and resnet_prob >= resnet_threshold:
+        return True
     return False
 
 
@@ -188,15 +184,24 @@ def detect_ocr_inverse_mask(
         hw_rects: list[tuple[int, int, int, int]] = []
         if hw_classifier is not None:
             hw_rects = [b.bbox for b in hw_classifier.detect(image)]
+
+        # Batch ResNet inference once for all OCR boxes — much faster than
+        # per-box GPU forwards (one forward pass instead of len(boxes)).
+        resnet_probs: list[float] = []
+        if resnet_classifier is not None:
+            resnet_probs = resnet_classifier.predict_batch(
+                image, [b.poly for b in accepted_boxes]
+            )
+
         kept = []
-        for ob in accepted_boxes:
+        for i, ob in enumerate(accepted_boxes):
+            rprob = resnet_probs[i] if resnet_probs else None
             if _ocr_box_is_handwriting(
                 ob.poly,
                 hw_rects,
                 threshold=hw_overlap_threshold,
-                resnet_classifier=resnet_classifier,
+                resnet_prob=rprob,
                 resnet_threshold=resnet_threshold,
-                image=image,
             ):
                 pts = ob.poly.astype(np.int32).reshape(-1, 2)
                 hw_voted_ocr_rects.append(cv2.boundingRect(pts))

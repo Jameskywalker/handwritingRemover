@@ -65,19 +65,43 @@ class ResNetHwClassifier:
 
     def predict(self, image: np.ndarray, poly: np.ndarray) -> float:
         """Return handwriting probability (0–1) for the OCR polygon ROI."""
+        return self.predict_batch(image, [poly])[0]
+
+    def predict_batch(
+        self, image: np.ndarray, polys: list[np.ndarray]
+    ) -> list[float]:
+        """Batched HW probabilities for multiple polygons against ``image``.
+
+        Stacks all crops into a single tensor and runs one GPU forward pass.
+        Empty / invalid polygons get probability 0.0 in the output, with
+        positions preserved so callers can index by original poly index.
+        """
         from PIL import Image as PILImage
 
-        pts = poly.astype(np.int32).reshape(-1, 2)
-        x, y, w, h = cv2.boundingRect(pts)
-        if w <= 0 or h <= 0:
-            return 0.0
-        crop = image[y : y + h, x : x + w]
-        if crop.size == 0:
-            return 0.0
+        out = [0.0] * len(polys)
+        if not polys:
+            return out
 
-        pil = PILImage.fromarray(crop)
-        x_t = self._transform(pil).unsqueeze(0).to(self._device)
+        tensors = []
+        keep_idx: list[int] = []
+        for i, poly in enumerate(polys):
+            pts = poly.astype(np.int32).reshape(-1, 2)
+            x, y, w, h = cv2.boundingRect(pts)
+            if w <= 0 or h <= 0:
+                continue
+            crop = image[y : y + h, x : x + w]
+            if crop.size == 0:
+                continue
+            tensors.append(self._transform(PILImage.fromarray(crop)))
+            keep_idx.append(i)
+
+        if not tensors:
+            return out
+
+        batch = self._torch.stack(tensors).to(self._device)
         with self._torch.inference_mode():
-            logits = self._model(x_t)
-            probs = self._torch.softmax(logits, dim=-1)[0]
-            return float(probs[1].item())  # class 1 = handwriting
+            logits = self._model(batch)
+            probs = self._torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
+        for j, idx in enumerate(keep_idx):
+            out[idx] = float(probs[j])
+        return out
