@@ -48,6 +48,7 @@ class YoloHwClassifier:
         device: str = "cpu",
         conf: float = 0.40,
         imgsz: int = 1280,
+        augment: bool = True,
     ) -> None:
         try:
             from ultralytics import YOLO  # type: ignore
@@ -71,6 +72,7 @@ class YoloHwClassifier:
         self._device = device
         self._conf = float(conf)
         self._imgsz = int(imgsz)
+        self._augment = bool(augment)
 
     def detect(self, image: np.ndarray) -> list[HwBox]:
         # ultralytics expects BGR; we receive RGB
@@ -81,6 +83,7 @@ class YoloHwClassifier:
             imgsz=self._imgsz,
             device=self._device,
             verbose=False,
+            augment=self._augment,
         )[0]
         if result.boxes is None or len(result.boxes) == 0:
             return []

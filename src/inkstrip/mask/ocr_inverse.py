@@ -43,28 +43,26 @@ def _ocr_box_is_handwriting(
     *,
     threshold: float = 0.30,
 ) -> bool:
-    """True if the OCR polygon overlaps any HW rect by ≥ threshold of the
-    smaller box's area. Using min-area instead of IoU is more lenient when
-    the OCR bbox is much larger than the HW bbox or vice versa — both are
-    common in mixed handwriting/print pages."""
+    """True if the **union** of HW rects covers ≥ threshold of the OCR rect.
+
+    Using union/OCR instead of inter / min(areas) prevents a single small
+    HW bbox from flipping an entire long printed-text line into "handwriting"
+    just because the small box sat fully inside it. We require enough hw
+    coverage to plausibly be the dominant content of that OCR region.
+    """
     pts = poly.astype(np.int32).reshape(-1, 2)
     ox, oy, ow, oh = cv2.boundingRect(pts)
-    o_area = max(1, ow * oh)
+    if ow <= 0 or oh <= 0:
+        return False
+    canvas = np.zeros((oh, ow), dtype=bool)
     for hx, hy, hw_, hh in hw_rects:
-        ix0 = max(ox, hx)
-        iy0 = max(oy, hy)
-        ix1 = min(ox + ow, hx + hw_)
-        iy1 = min(oy + oh, hy + hh)
-        iw = max(0, ix1 - ix0)
-        ih = max(0, iy1 - iy0)
-        inter = iw * ih
-        if inter == 0:
-            continue
-        h_area = max(1, hw_ * hh)
-        ratio = inter / min(o_area, h_area)
-        if ratio >= threshold:
-            return True
-    return False
+        ix0 = max(0, hx - ox)
+        iy0 = max(0, hy - oy)
+        ix1 = min(ow, hx + hw_ - ox)
+        iy1 = min(oh, hy + hh - oy)
+        if ix1 > ix0 and iy1 > iy0:
+            canvas[iy0:iy1, ix0:ix1] = True
+    return canvas.sum() / (ow * oh) >= threshold
 
 
 def _build_ink_mask(image: np.ndarray, block_size: int, C: int) -> np.ndarray:
