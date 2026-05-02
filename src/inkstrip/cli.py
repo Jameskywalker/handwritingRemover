@@ -42,10 +42,10 @@ def run(
         "--page-crop/--no-page-crop",
         help="Auto-detect and warp page quadrilateral. Default inherits from --photo.",
     ),
-    strategy: str = typer.Option(
-        "color_red",
-        "--strategy",
-        help="Mask strategy: color_red | color_blue | color_any | yolo_morph | ocr_inverse.",
+    no_hw_classifier: bool = typer.Option(
+        False,
+        "--no-hw-classifier",
+        help="Disable the YOLOv8 handwriting classifier (uses pure OCR-inverse).",
     ),
     dpi: int = typer.Option(300, "--dpi", help="Render DPI for scanned PDFs (M2)."),
     device: str = typer.Option("auto", "--device", help="auto / cuda / cpu / mps."),
@@ -56,7 +56,7 @@ def run(
     cfg = InkstripConfig(
         photo_mode=photo,
         page_crop=page_crop,
-        mask_strategy=strategy,  # type: ignore[arg-type]
+        ocr_use_hw_classifier=not no_hw_classifier,
         render_dpi=dpi,
         device=device,  # type: ignore[arg-type]
         inpainter=inpainter,  # type: ignore[arg-type]

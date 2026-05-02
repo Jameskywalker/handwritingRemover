@@ -34,27 +34,6 @@ class InkstripConfig:
     render_dpi: int = 300
     """DPI for rasterizing scanned PDFs."""
 
-    # detection / mask strategy
-    mask_strategy: Literal[
-        "yolo_morph", "color_red", "color_blue", "color_any", "ocr_inverse"
-    ] = "color_red"
-    """How to find handwriting:
-    - yolo_morph: YOLOv8 detector → bbox → dilate (best on real English handwriting)
-    - color_red / color_blue / color_any: pixel-level RGB channel-diff (best on
-      colored ink over printed black text — the most common real-world case).
-    - ocr_inverse: OCR finds printed text, subtract from total ink mask. Works
-      on black-and-white pages where color cues don't apply.
-    """
-    detector: str = "yolov8_hw"
-    det_conf: float = 0.25
-    det_iou: float = 0.45
-    det_imgsz: int = 1280
-
-    # color-based mask params (used when mask_strategy starts with "color_")
-    color_delta: int | None = None
-    color_min_brightness: int | None = None
-    color_protect_print: bool = True
-
     # ocr_inverse params
     ocr_lang: Literal["ch", "en", "ch_en"] = "ch_en"
     ocr_min_confidence: float = 0.30
@@ -116,7 +95,7 @@ class InkstripConfig:
     @classmethod
     def preset(cls, name: Literal["photo", "scan", "annot_only"]) -> "InkstripConfig":
         if name == "photo":
-            return cls(photo_mode=True, det_imgsz=1600, dilate_px=9)
+            return cls(photo_mode=True, dilate_px=9)
         if name == "scan":
             return cls(photo_mode=False, render_dpi=300, dilate_px=7)
         if name == "annot_only":

@@ -1,32 +1,17 @@
-"""Single-image pipeline: detect / mask → inpaint → save.
-
-Two strategies share one pipeline:
-- yolo_morph: detect bboxes via YOLOv8, render+dilate as mask, inpaint
-- color_*: skip detection entirely, build a mask directly from the image
-  using RGB channel-difference; far more accurate when ink is colored.
-"""
+"""Single-image pipeline: OCR-inverse + handwriting classifier → mask → inpaint → save."""
 
 from __future__ import annotations
 
 import time
 from typing import Any
 
-import numpy as np
-
 from inkstrip.config import InkstripConfig
 from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
 from inkstrip.io.savers import save_image
-from inkstrip.mask.color import detect_color_mask
 from inkstrip.mask.morph import mask_coverage
 from inkstrip.types import OutputLike, PageMetadata, ProgressCallback, RemoveResult
 from inkstrip.utils.progress import emit
-
-_COLOR_PROFILE_FOR_STRATEGY = {
-    "color_red": "red",
-    "color_blue": "blue",
-    "color_any": "any_colored",
-}
 
 
 class ImagePipeline:
@@ -36,58 +21,28 @@ class ImagePipeline:
         self,
         cfg: InkstripConfig,
         *,
-        detector=None,
         mask_builder=None,
         inpainter=None,
         ocr_engine=None,
         hw_classifier=None,
     ) -> None:
         self.cfg = cfg
-        self._detector = detector  # lazily built only for yolo_morph
         self._mask_builder = mask_builder
-        self._ocr_engine = ocr_engine  # lazily built only for ocr_inverse
-        self._hw_classifier = hw_classifier  # lazily built only for ocr_inverse
+        self._ocr_engine = ocr_engine
+        self._hw_classifier = hw_classifier
         self.inpainter = inpainter or _make_inpainter(cfg)
 
-    def _build_yolo_mask(self, img: np.ndarray, cfg: InkstripConfig) -> tuple[np.ndarray, int]:
-        from inkstrip.detect.yolo_hw import YoloHandwritingDetector
-        from inkstrip.mask.morph import MorphMaskBuilder
-
-        detector = self._detector or YoloHandwritingDetector(cfg)
-        mask_builder = self._mask_builder or MorphMaskBuilder(cfg)
-        boxes = detector.detect(img)
-        mask = mask_builder.build(img, boxes)
-        return mask, len(boxes)
-
-    def _build_color_mask(self, img: np.ndarray, cfg: InkstripConfig) -> tuple[np.ndarray, int]:
-        profile = _COLOR_PROFILE_FOR_STRATEGY[cfg.mask_strategy]
-        dilate_px = cfg.dilate_px if cfg.dilate_px is not None else 7
-        mask = detect_color_mask(
-            img,
-            profile=profile,
-            dilate_px=dilate_px,
-            closing_px=cfg.closing_px,
-            min_component_area=cfg.min_box_area,
-            delta=cfg.color_delta,
-            min_brightness=cfg.color_min_brightness,
-            protect_print=cfg.color_protect_print,
-        )
-        return mask, 0  # bbox count not meaningful for color
-
-    def _build_ocr_inverse_mask(
-        self, img: np.ndarray, cfg: InkstripConfig
-    ) -> tuple[np.ndarray, int]:
+    def _build_mask(self, img):
         from inkstrip.mask.ocr_inverse import OcrInverseMaskBuilder
 
         if self._mask_builder is not None:
             builder = self._mask_builder
         else:
             builder = OcrInverseMaskBuilder(
-                cfg,
+                self.cfg,
                 ocr_engine=self._ocr_engine,
                 hw_classifier=self._hw_classifier,
             )
-            # cache built dependencies so subsequent runs reuse them
             self._ocr_engine = builder._engine
             self._hw_classifier = builder._hw_classifier
         return builder.build(img)
@@ -124,20 +79,12 @@ class ImagePipeline:
             if info.warning:
                 warnings.append(info.warning)
 
-        if cfg.mask_strategy == "yolo_morph":
-            emit(progress, "detect", message=f"running {cfg.detector}")
-            mask, bbox_count = self._build_yolo_mask(img, cfg)
-            emit(progress, "mask", message=f"{bbox_count} bbox → mask")
-        elif cfg.mask_strategy == "ocr_inverse":
-            emit(progress, "mask", message="OCR-inverse mask")
-            mask, bbox_count = self._build_ocr_inverse_mask(img, cfg)
-            if bbox_count == 0:
-                warnings.append(
-                    "ocr_inverse: no printed text detected; output equals input"
-                )
-        else:
-            emit(progress, "mask", message=f"color mask ({cfg.mask_strategy})")
-            mask, bbox_count = self._build_color_mask(img, cfg)
+        emit(progress, "mask", message="OCR-inverse mask")
+        mask, bbox_count = self._build_mask(img)
+        if bbox_count == 0:
+            warnings.append(
+                "ocr_inverse: no printed text detected; output equals input"
+            )
 
         coverage = mask_coverage(mask)
         has_target = bool((mask > 0).any())

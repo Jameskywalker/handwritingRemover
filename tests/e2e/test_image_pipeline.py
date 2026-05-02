@@ -99,7 +99,6 @@ def test_page_crop_and_ocr_inverse_on_hw_jpg(tmp_path: Path) -> None:
     out = tmp_path / "cleaned_ocr.png"
     cfg = InkstripConfig(
         page_crop=True,
-        mask_strategy="ocr_inverse",
         device="auto",
     )
     result = remove_handwriting(src, out, config=cfg)

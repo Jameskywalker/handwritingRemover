@@ -1,9 +1,8 @@
 """Gradio demo: upload an image, see handwriting removed.
 
-Three panels: original / mask / cleaned. The dropdown picks between the
-two detection strategies — color-based (best for red/blue/etc. ink on
-printed black text) and YOLO+morph (best for English handwriting). Sliders
-expose the parameters most worth tweaking.
+Single strategy: OCR finds printed text, the handwriting classifier
+rescues bboxes OCR mistook for printed text, and the inverse of that
+becomes the mask. Sliders expose only what's worth tweaking.
 
 Run:
     inkstrip serve            # http://127.0.0.1:7860
@@ -20,7 +19,6 @@ import numpy as np
 from inkstrip.config import InkstripConfig
 from inkstrip.inpaint.lama_onnx import LamaOnnxInpainter
 from inkstrip.io.loaders import load_image
-from inkstrip.mask.color import detect_color_mask
 from inkstrip.mask.morph import mask_coverage
 from inkstrip.utils.logging import get_logger
 
@@ -29,16 +27,6 @@ _log = get_logger("web")
 # Cache heavy components by device — first request warms them, subsequent
 # requests reuse.
 _INPAINTER: dict[str, LamaOnnxInpainter] = {}
-_DETECTOR: dict[str, Any] = {}
-
-_STRATEGY_LABELS = {
-    "color_red": "Red ink (recommended for red pen on printed text)",
-    "color_blue": "Blue ink",
-    "color_any": "Any colored ink (red+blue+green)",
-    "yolo_morph": "YOLOv8 detector (handwriting in any color, English-leaning)",
-    "ocr_inverse": "OCR inverse (black & white printed page with black handwriting)",
-}
-
 _OCR_ENGINE: dict[str, Any] = {}
 _HW_CLASSIFIER: dict[str, Any] = {}
 
@@ -48,15 +36,6 @@ def _get_inpainter(device: str) -> LamaOnnxInpainter:
         _log.info("loading LaMa ONNX inpainter for device=%s", device)
         _INPAINTER[device] = LamaOnnxInpainter(InkstripConfig(device=device))
     return _INPAINTER[device]
-
-
-def _get_detector(device: str):
-    if device not in _DETECTOR:
-        from inkstrip.detect.yolo_hw import YoloHandwritingDetector
-
-        _log.info("loading YOLO detector for device=%s", device)
-        _DETECTOR[device] = YoloHandwritingDetector(InkstripConfig(device=device))
-    return _DETECTOR[device]
 
 
 def _get_ocr_engine(device: str):
@@ -81,17 +60,13 @@ def _get_hw_classifier(device: str):
 
 def _process(
     image: Any,
-    strategy_label: str,
     dilate_px: int,
-    delta: int,
-    protect_print: bool,
     page_crop: bool,
     use_hw_classifier: bool,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
         raise ValueError("upload an image first")
-    strategy = next(k for k, v in _STRATEGY_LABELS.items() if v == strategy_label)
 
     started = time.perf_counter()
     arr = load_image(image).array
@@ -106,47 +81,25 @@ def _process(
         elif info.cropped:
             crop_note = f"page cropped (deskew {info.deskew_deg:+.1f}°)"
 
-    if strategy == "yolo_morph":
-        from inkstrip.mask.morph import MorphMaskBuilder
+    from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
 
-        cfg = InkstripConfig(
-            mask_strategy="yolo_morph",
-            dilate_px=int(dilate_px) if dilate_px > 0 else None,
-            device=device,  # type: ignore[arg-type]
-        )
-        detector = _get_detector(device)
-        boxes = detector.detect(arr)
-        mask = MorphMaskBuilder(cfg).build(arr, boxes)
-        bbox_count = len(boxes)
-    elif strategy == "ocr_inverse":
-        from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
-
-        engine = _get_ocr_engine(device)
-        hw_classifier = _get_hw_classifier(device) if use_hw_classifier else None
-        mask, bbox_count = detect_ocr_inverse_mask(
-            arr,
-            ocr_engine=engine,
-            hw_classifier=hw_classifier,
-            dilate_px=int(dilate_px) if dilate_px > 0 else 5,
-        )
-    else:
-        profile = {"color_red": "red", "color_blue": "blue", "color_any": "any_colored"}[strategy]
-        mask = detect_color_mask(
-            arr,
-            profile=profile,
-            dilate_px=int(dilate_px) if dilate_px > 0 else 7,
-            delta=int(delta) if delta > 0 else None,
-            protect_print=protect_print,
-        )
-        bbox_count = 0
+    engine = _get_ocr_engine(device)
+    hw_classifier = _get_hw_classifier(device) if use_hw_classifier else None
+    mask, bbox_count = detect_ocr_inverse_mask(
+        arr,
+        ocr_engine=engine,
+        hw_classifier=hw_classifier,
+        dilate_px=int(dilate_px) if dilate_px > 0 else 5,
+    )
 
     has_target = bool((mask > 0).any())
     if not has_target:
         cleaned = arr
-        if strategy == "ocr_inverse" and bbox_count == 0:
-            note = "OCR detected no printed text — output equals input (try a different strategy if this is a pure handwriting page)."
-        else:
-            note = "No handwriting detected for this strategy — try lowering delta or switching strategy."
+        note = (
+            "OCR detected no printed text — output equals input."
+            if bbox_count == 0
+            else "Mask is empty — handwriting may have been fully covered by the printed mask."
+        )
     else:
         cleaned = _get_inpainter(device).inpaint(arr, mask)
         note = ""
@@ -155,10 +108,7 @@ def _process(
     cov = mask_coverage(mask) * 100
 
     mask_rgb = np.stack([mask, mask, mask], axis=-1)
-    summary = f"**strategy** {strategy} · **mask coverage** {cov:.2f}%"
-    if bbox_count:
-        summary += f" · **{bbox_count} bbox**"
-    summary += f" · **{elapsed:.0f} ms**"
+    summary = f"**mask coverage** {cov:.2f}% · **{bbox_count} printed bbox** · **{elapsed:.0f} ms**"
     if crop_note:
         summary += f"\n\n_{crop_note}_"
     if note:
@@ -172,10 +122,10 @@ def build_ui():
     with gr.Blocks(title="inkstrip — remove handwriting") as demo:
         gr.Markdown(
             "# inkstrip\n"
-            "Upload a page with handwritten ink on top of printed content. "
-            "Pick a strategy that matches the ink color — for most real-world "
-            "documents (red pen, blue pen) the color modes give dramatically "
-            "better results than the YOLO detector."
+            "Upload a page with handwritten ink on printed content. "
+            "OCR finds the printed text; a YOLOv8 handwriting classifier "
+            "rescues bboxes OCR mistook for printed text; the inverse is "
+            "the handwriting mask, which gets inpainted away."
         )
         with gr.Row():
             with gr.Column(scale=1):
@@ -185,28 +135,12 @@ def build_ui():
                     image_mode="RGB",
                     sources=["upload", "clipboard"],
                 )
-                strategy = gr.Dropdown(
-                    choices=list(_STRATEGY_LABELS.values()),
-                    value=_STRATEGY_LABELS["color_red"],
-                    label="Strategy",
-                )
                 dilate = gr.Slider(
                     minimum=0,
                     maximum=25,
-                    value=7,
+                    value=5,
                     step=1,
                     label="Mask dilation (px)",
-                )
-                delta = gr.Slider(
-                    minimum=0,
-                    maximum=120,
-                    value=0,
-                    step=5,
-                    label="Color δ (0 = profile default; raise to be stricter)",
-                )
-                protect = gr.Checkbox(
-                    value=True,
-                    label="Protect printed text (skip black pixels even if dilated)",
                 )
                 page_crop_cb = gr.Checkbox(
                     value=False,
@@ -214,7 +148,7 @@ def build_ui():
                 )
                 hw_classifier_cb = gr.Checkbox(
                     value=True,
-                    label="HW classifier (rescue same-color handwriting OCR mistook for printed text — ocr_inverse only)",
+                    label="HW classifier (rescue same-color handwriting OCR mistook for printed text)",
                 )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
@@ -230,7 +164,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, strategy, dilate, delta, protect, page_crop_cb, hw_classifier_cb, device],
+            inputs=[inp, dilate, page_crop_cb, hw_classifier_cb, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 
