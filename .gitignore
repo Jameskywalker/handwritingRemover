@@ -20,6 +20,7 @@ htmlcov/
 eval_outputs/
 tests/fixtures/_generated/
 weights_cache/
+weights/
 
 # editor
 .vscode/

@@ -1,18 +1,25 @@
-"""Black-and-white friendly mask: ink_mask − printed_text_mask = handwriting.
+"""Mask handwriting using OCR to localise printed text.
 
-Strategy:
-1. Binarise the page to capture all dark strokes (handwriting + printed).
-2. Run an OCR detector to localise printed-text polygons.
-3. Inside each polygon, run a *local* Otsu threshold to recover the actual
-   glyphs (not the whole bbox), so we don't accidentally whitelist surrounding
-   handwriting just because it happens to fall inside a text-line bbox.
-4. Subtract the dilated printed-glyph mask from the global ink mask.
-5. Standard morphology cleanup.
+Default mode (``combine_color=True``) builds:
 
-If the OCR engine returns zero high-confidence boxes we *deliberately* return
-an empty mask. The pipeline detects this and skips inpainting with a warning;
-that is preferable to erasing the user's handwriting on a page that happened
-to contain no printed text.
+    (coloured ink — guaranteed handwriting) ∪ (dark ink minus printed glyphs)
+
+Two pieces, two failure modes covered:
+
+1. **Coloured ink** (red / blue / green pen on a printed b&w page). Modern
+   OCR happily recognises coloured handwriting as text and would mark it as
+   "printed", subtracting it from the mask — exactly the wrong thing. We
+   bypass the OCR veto for any pixel that's coloured.
+2. **Black handwriting on a black-printed page**. There's no colour cue, so
+   OCR is the only tool. We binarise the page, locate printed glyphs inside
+   each OCR bbox via local Otsu, dilate slightly, and subtract.
+
+A pure-monochrome page collapses gracefully: the colour layer is empty so the
+result is exactly the classic ``ink − printed`` mask. Setting
+``combine_color=False`` recovers that strict behaviour explicitly.
+
+If OCR finds zero printed boxes *and* no colour ink is present, we return an
+empty mask so the pipeline can warn rather than erase the entire page.
 """
 
 from __future__ import annotations
@@ -26,7 +33,38 @@ from inkstrip.mask.color import _post_process
 
 if TYPE_CHECKING:
     from inkstrip.config import InkstripConfig
+    from inkstrip.detect.hw_classifier import HwClassifier
     from inkstrip.detect.ocr_rapid import OcrEngine
+
+
+def _ocr_box_is_handwriting(
+    poly: np.ndarray,
+    hw_rects: list[tuple[int, int, int, int]],
+    *,
+    threshold: float = 0.30,
+) -> bool:
+    """True if the OCR polygon overlaps any HW rect by ≥ threshold of the
+    smaller box's area. Using min-area instead of IoU is more lenient when
+    the OCR bbox is much larger than the HW bbox or vice versa — both are
+    common in mixed handwriting/print pages."""
+    pts = poly.astype(np.int32).reshape(-1, 2)
+    ox, oy, ow, oh = cv2.boundingRect(pts)
+    o_area = max(1, ow * oh)
+    for hx, hy, hw_, hh in hw_rects:
+        ix0 = max(ox, hx)
+        iy0 = max(oy, hy)
+        ix1 = min(ox + ow, hx + hw_)
+        iy1 = min(oy + oh, hy + hh)
+        iw = max(0, ix1 - ix0)
+        ih = max(0, iy1 - iy0)
+        inter = iw * ih
+        if inter == 0:
+            continue
+        h_area = max(1, hw_ * hh)
+        ratio = inter / min(o_area, h_area)
+        if ratio >= threshold:
+            return True
+    return False
 
 
 def _build_ink_mask(image: np.ndarray, block_size: int, C: int) -> np.ndarray:
@@ -96,30 +134,93 @@ def detect_ocr_inverse_mask(
     dilate_px: int = 5,
     closing_px: int = 3,
     min_component_area: int = 12,
+    combine_color: bool = True,
+    color_profile: str = "any_colored",
+    color_dilate_px: int = 5,
+    hw_classifier: "HwClassifier | None" = None,
+    hw_overlap_threshold: float = 0.30,
 ) -> tuple[np.ndarray, int]:
+    """Build a handwriting mask using OCR to localise printed text.
+
+    With ``combine_color=True`` (default) the result is
+
+        (colored ink — guaranteed handwriting) ∪ (dark ink minus printed glyphs)
+
+    This handles the common real-world case where the handwriting is in
+    coloured pen and OCR happily recognises it as text — pure subtraction
+    would erase those strokes from the mask. Colour pixels bypass the OCR
+    veto. On a strictly monochrome page the colour layer is empty, so the
+    result reduces to the original ink − printed semantics.
+    """
     if image.dtype != np.uint8:
         raise ValueError("image must be uint8")
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("image must be HxWx3 RGB")
 
     boxes = ocr_engine.detect(image)
-    accepted = [b.poly for b in boxes if b.score >= min_confidence]
+    accepted_boxes = [b for b in boxes if b.score >= min_confidence]
 
-    if not accepted:
-        h, w = image.shape[:2]
-        return np.zeros((h, w), dtype=np.uint8), 0
+    h, w = image.shape[:2]
+
+    # Per-bbox HW classification: drop OCR boxes that overlap a handwriting
+    # bbox significantly. Operating on bboxes (not pixels) avoids the trap
+    # where the HW bbox covers some printed glyphs underneath and ends up
+    # protecting them too.
+    if hw_classifier is not None and accepted_boxes:
+        hw_boxes = hw_classifier.detect(image)
+        if hw_boxes:
+            hw_rects = [b.bbox for b in hw_boxes]
+            kept = []
+            for ob in accepted_boxes:
+                if _ocr_box_is_handwriting(ob.poly, hw_rects, threshold=hw_overlap_threshold):
+                    continue
+                kept.append(ob)
+            accepted_boxes = kept
+
+    accepted = [b.poly for b in accepted_boxes]
+
+    color_layer = np.zeros((h, w), dtype=np.uint8)
+    if combine_color:
+        from inkstrip.mask.color import detect_color_mask
+
+        color_layer = detect_color_mask(
+            image,
+            profile=color_profile,
+            dilate_px=color_dilate_px,
+            closing_px=closing_px,
+            min_component_area=min_component_area,
+            protect_print=True,
+        )
 
     ink_mask = _build_ink_mask(image, ink_block_size, ink_C)
+
+    if not accepted:
+        # No printed text remains after HW filtering. If we have a colour
+        # layer, that *is* the handwriting mask; otherwise return empty so
+        # the pipeline emits a warning rather than erasing the whole page.
+        if combine_color and color_layer.any():
+            return color_layer, 0
+        return np.zeros((h, w), dtype=np.uint8), 0
+
     printed_mask = _build_printed_glyph_mask(
         image,
         accepted,
         pad_px=printed_pad_px,
         glyph_dilate_px=printed_glyph_dilate_px,
     )
-    handwriting = cv2.bitwise_and(ink_mask, cv2.bitwise_not(printed_mask))
+
+    dark_handwriting = cv2.bitwise_and(ink_mask, cv2.bitwise_not(printed_mask))
+
+    if combine_color:
+        # Coloured ink bypasses the OCR veto entirely — coloured glyphs are
+        # always handwriting in our target use case (red/blue/green pen on a
+        # printed black-and-white document).
+        combined = cv2.bitwise_or(color_layer, dark_handwriting)
+    else:
+        combined = dark_handwriting
 
     final = _post_process(
-        handwriting,
+        combined,
         dilate_px=dilate_px,
         closing_px=closing_px,
         min_component_area=min_component_area,
@@ -135,6 +236,7 @@ class OcrInverseMaskBuilder:
         self,
         cfg: "InkstripConfig",
         ocr_engine: "OcrEngine | None" = None,
+        hw_classifier: "HwClassifier | None" = None,
     ) -> None:
         self.cfg = cfg
         if ocr_engine is None:
@@ -148,6 +250,17 @@ class OcrInverseMaskBuilder:
             )
         self._engine = ocr_engine
 
+        if hw_classifier is None and cfg.ocr_use_hw_classifier:
+            from inkstrip.detect.hw_classifier import YoloHwClassifier
+
+            device = "cuda" if cfg.device == "cuda" else "cpu"
+            hw_classifier = YoloHwClassifier(
+                device=device,
+                conf=cfg.ocr_hw_conf,
+                imgsz=cfg.ocr_hw_imgsz,
+            )
+        self._hw_classifier = hw_classifier
+
     def build(self, image: np.ndarray, boxes=None) -> tuple[np.ndarray, int]:
         cfg = self.cfg
         dilate_px = cfg.dilate_px if cfg.dilate_px is not None else 5
@@ -157,7 +270,10 @@ class OcrInverseMaskBuilder:
             printed_pad_px=cfg.ocr_printed_pad_px,
             printed_glyph_dilate_px=cfg.ocr_printed_dilate_px,
             min_confidence=cfg.ocr_min_confidence,
+            combine_color=cfg.ocr_combine_color,
             dilate_px=dilate_px,
             closing_px=cfg.closing_px,
             min_component_area=cfg.min_box_area,
+            hw_classifier=self._hw_classifier,
+            hw_overlap_threshold=cfg.ocr_hw_overlap_threshold,
         )

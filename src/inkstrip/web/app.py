@@ -40,6 +40,7 @@ _STRATEGY_LABELS = {
 }
 
 _OCR_ENGINE: dict[str, Any] = {}
+_HW_CLASSIFIER: dict[str, Any] = {}
 
 
 def _get_inpainter(device: str) -> LamaOnnxInpainter:
@@ -67,6 +68,17 @@ def _get_ocr_engine(device: str):
     return _OCR_ENGINE[device]
 
 
+def _get_hw_classifier(device: str):
+    if device not in _HW_CLASSIFIER:
+        from inkstrip.detect.hw_classifier import YoloHwClassifier
+
+        _log.info("loading YOLOv8n HW classifier for device=%s", device)
+        _HW_CLASSIFIER[device] = YoloHwClassifier(
+            device=device if device != "auto" else "cpu"
+        )
+    return _HW_CLASSIFIER[device]
+
+
 def _process(
     image: Any,
     strategy_label: str,
@@ -74,6 +86,7 @@ def _process(
     delta: int,
     protect_print: bool,
     page_crop: bool,
+    use_hw_classifier: bool,
     device: str,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     if image is None:
@@ -109,9 +122,11 @@ def _process(
         from inkstrip.mask.ocr_inverse import detect_ocr_inverse_mask
 
         engine = _get_ocr_engine(device)
+        hw_classifier = _get_hw_classifier(device) if use_hw_classifier else None
         mask, bbox_count = detect_ocr_inverse_mask(
             arr,
             ocr_engine=engine,
+            hw_classifier=hw_classifier,
             dilate_px=int(dilate_px) if dilate_px > 0 else 5,
         )
     else:
@@ -197,6 +212,10 @@ def build_ui():
                     value=False,
                     label="Auto-crop page (perspective-warp phone photos)",
                 )
+                hw_classifier_cb = gr.Checkbox(
+                    value=True,
+                    label="HW classifier (rescue same-color handwriting OCR mistook for printed text — ocr_inverse only)",
+                )
                 device = gr.Radio(
                     choices=["auto", "cpu", "cuda"],
                     value="auto",
@@ -211,7 +230,7 @@ def build_ui():
 
         run_btn.click(
             fn=_process,
-            inputs=[inp, strategy, dilate, delta, protect, page_crop_cb, device],
+            inputs=[inp, strategy, dilate, delta, protect, page_crop_cb, hw_classifier_cb, device],
             outputs=[cleaned_img, mask_img, summary],
         )
 

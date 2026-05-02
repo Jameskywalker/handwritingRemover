@@ -60,6 +60,25 @@ class InkstripConfig:
     ocr_min_confidence: float = 0.30
     ocr_printed_pad_px: int = 4
     ocr_printed_dilate_px: int = 2
+    ocr_combine_color: bool = True
+    """Combine ocr_inverse with a coloured-ink layer. Coloured pixels bypass
+    the OCR-printed veto, fixing the failure case where OCR recognises
+    coloured handwriting as text and subtracts it from the mask. Set False
+    for the strict ink-minus-printed semantics on monochrome pages."""
+
+    ocr_use_hw_classifier: bool = True
+    """Run a YOLOv8n handwriting-region classifier alongside OCR. Bboxes the
+    classifier flags as handwriting are exempt from the printed-glyph
+    subtraction — fixes the same-color (black-on-black) failure case where
+    OCR recognises Chinese handwriting as printed text and erases it.
+    Weights: armvectores/yolov8n_handwritten_text_detection (~6 MB)."""
+
+    ocr_hw_conf: float = 0.40
+    ocr_hw_imgsz: int = 1280
+    ocr_hw_overlap_threshold: float = 0.30
+    """An OCR bbox is treated as handwriting (and excluded from the printed
+    subtraction) if any HW bbox overlaps it by ≥ this fraction of the
+    smaller of the two boxes' areas."""
 
     # mask post-processing
     dilate_px: int | None = None

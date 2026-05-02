@@ -40,11 +40,13 @@ class ImagePipeline:
         mask_builder=None,
         inpainter=None,
         ocr_engine=None,
+        hw_classifier=None,
     ) -> None:
         self.cfg = cfg
         self._detector = detector  # lazily built only for yolo_morph
         self._mask_builder = mask_builder
         self._ocr_engine = ocr_engine  # lazily built only for ocr_inverse
+        self._hw_classifier = hw_classifier  # lazily built only for ocr_inverse
         self.inpainter = inpainter or _make_inpainter(cfg)
 
     def _build_yolo_mask(self, img: np.ndarray, cfg: InkstripConfig) -> tuple[np.ndarray, int]:
@@ -80,9 +82,14 @@ class ImagePipeline:
         if self._mask_builder is not None:
             builder = self._mask_builder
         else:
-            builder = OcrInverseMaskBuilder(cfg, ocr_engine=self._ocr_engine)
-            # cache the engine the builder constructed so subsequent runs reuse it
+            builder = OcrInverseMaskBuilder(
+                cfg,
+                ocr_engine=self._ocr_engine,
+                hw_classifier=self._hw_classifier,
+            )
+            # cache built dependencies so subsequent runs reuse them
             self._ocr_engine = builder._engine
+            self._hw_classifier = builder._hw_classifier
         return builder.build(img)
 
     def run(
