@@ -63,10 +63,30 @@ class InkstripConfig:
     weights/resnet18_hw_classifier.pt — train via
     scripts/train_resnet_hw_classifier.py."""
 
-    ocr_resnet_threshold: float = 0.50
+    ocr_resnet_threshold: float = 0.15
     """An OCR bbox is treated as handwriting (and excluded from the printed
     subtraction) if any HW bbox overlaps it by ≥ this fraction of the
     smaller of the two boxes' areas."""
+
+    ocr_split_lines_at_gaps: bool = True
+    """Before classification, split each OCR line bbox at every column-gap
+    longer than ~25% of the line height. Gives the ResNet word/character-
+    level crops instead of squashed line averages, and naturally decomposes
+    mixed printed+handwriting lines."""
+
+    ocr_resnet_split_uncertain: bool = True
+    """When the ResNet probability lands in the 'uncertain' band (between
+    ocr_resnet_uncertain_low and _high), split the bbox into sub-regions
+    (re-OCR the upscaled crop, fall back to a projection or halve split)
+    and re-classify each sub-region. Mixed printed+handwriting bboxes get
+    decomposed into pure sub-regions, fixing the failure mode where a
+    line-level OCR box contains both textures."""
+
+    ocr_resnet_uncertain_low: float = 0.05
+    """ResNet prob below this is "confidently printed" (no split)."""
+
+    ocr_resnet_uncertain_high: float = 0.50
+    """ResNet prob above this is "confidently handwriting" (no split)."""
 
     # mask post-processing
     dilate_px: int | None = None
